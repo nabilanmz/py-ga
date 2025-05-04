@@ -85,9 +85,31 @@ def read_penalty_file(filename):
 
 
 # Placeholder implementations for GA subroutines
-def generate_course_code(student_records):
-    # Implement mapping courses to indices
-    pass
+def generate_course_code(coursefile):
+    """
+    Parse the student course file to extract unique course codes.
+    Each line: <student_tag>$COURSE1$COURSE2$...$
+    Returns a dict mapping course_code to a unique index, and sets global TOTALCOURSE.
+    """
+    courses = []
+    with open(coursefile, "r") as f:
+        for raw in f:
+            record = raw.strip()
+            if not record or record.startswith("#"):
+                continue
+            # Remove trailing newline/funny character handled by strip()
+            tokens = [t for t in record.split("$") if t]
+            # Skip first token (e.g., student year or tag)
+            for cname in tokens[1:]:
+                code = cname.strip().upper()
+                if code not in courses:
+                    courses.append(code)
+    # Create mapping
+    course_index = {code: idx for idx, code in enumerate(courses)}
+    # Set global TOTALCOURSE (max index)
+    global TOTALCOURSE
+    TOTALCOURSE = len(courses) - 1
+    return course_index
 
 
 def init_constructors(lec_file_content):
