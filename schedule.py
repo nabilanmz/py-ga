@@ -1,35 +1,23 @@
+#!/usr/bin/env python3
 import time
 import random
 import os
-from typing import Callable, Dict, List, Tuple
-
-# --- Global scheduling data ---
-TOTALCOURSE = 0  # set by generate_course_code
-course_map: Dict[str, int] = {}  # maps course code -> index
-course_list: List[str] = []  # index -> course code
-chromos: List[Dict[str, int]] = []  # list of course structures
-CHOLEN = 0  # length of chromosome (total slots)
+from typing import List, Dict, Tuple, Callable
 
 
-# --- Dynamic array helper (replaces DynArray) ---
+# --- Dynamic array & int struct helpers ---
 def dyn_array(rows: int, cols: int) -> List[List[int]]:
     """
-    Create a 2D list of zeros with the given dimensions (replaces DynArray in C).
+    Create a 2D list of zeros with the given dimensions.
     """
     return [[0] * cols for _ in range(rows)]
 
 
 def int_struct(size: int) -> List[int]:
     """
-    Create a 1D list of zeros with the given length (replaces intstruct in C).
+    Create a 1D list of zeros with the given length.
     """
     return [0] * size
-
-    # --- File parsing utilities ---
-    """
-    Create a 2D list of zeros with the given dimensions.
-    """
-    return [[0] * cols for _ in range(rows)]
 
 
 # --- File parsing utilities ---
@@ -104,7 +92,7 @@ def read_timeslot_file(filename: str) -> Tuple[List[Dict[str, str]], int]:
                     pass
             else:
                 parts = line.split("\t")
-                day = parts[0]
+                day = parts[0].upper()
                 for time_str in parts[1:]:
                     if time_str:
                         slots.append({"day": day, "time": time_str})
@@ -123,19 +111,10 @@ def read_penalty_file(filename: str) -> Dict[int, int]:
     return penalty
 
 
-def dyn_array(rows: int, cols: int) -> List[List[int]]:
-    """
-    Create a 2D list of zeros with the given dimensions.
-    """
-    return [[0] * cols for _ in range(rows)]
+# --- Get TOTAL: count from a file (Getotal) ---
 
 
-# --- Get total count from file (Getotal) ---
 def get_total(filename: str) -> int:
-    """
-    Return the integer after 'TOTAL:' in a file, skipping comments (#) and blank lines.
-    Returns -1 if not found.
-    """
     try:
         with open(filename, "r") as f:
             for raw in f:
@@ -144,23 +123,16 @@ def get_total(filename: str) -> int:
                     continue
                 if "TOTAL:" in line:
                     parts = line.split(":", 1)
-                    try:
-                        return int(parts[1])
-                    except ValueError:
-                        raise ValueError(
-                            f"Invalid TOTAL value in {filename}: {parts[1]}"
-                        )
+                    return int(parts[1])
     except IOError as e:
         raise RuntimeError(f"[get_total] Could not open {filename}: {e}")
     return -1
 
 
 # --- Initialize time slot structure (Initimeslot) ---
+
+
 def init_time_slot(filename: str) -> List[Dict[str, str]]:
-    """
-    Parse timeslot file, returning a list of {{'day': DAY, 'time': TIMESLOT}}.
-    Ignores lines starting with '#' or containing 'TOTAL:'.
-    """
     slots: List[Dict[str, str]] = []
     try:
         with open(filename, "r") as f:
@@ -168,7 +140,7 @@ def init_time_slot(filename: str) -> List[Dict[str, str]]:
                 line = raw.strip()
                 if not line or line.startswith("#") or line.startswith("TOTAL:"):
                     continue
-                parts = line.split("	")
+                parts = line.split("\t")
                 day = parts[0].upper()
                 for time_str in parts[1:]:
                     if time_str:
@@ -179,10 +151,9 @@ def init_time_slot(filename: str) -> List[Dict[str, str]]:
 
 
 # --- Determine maximum slots per day (GetMaxSlot) ---
+
+
 def get_max_slot(slots: List[Dict[str, str]]) -> Tuple[int, int]:
-    """
-    Given a list of slot dicts with 'day', returns (max_slots_in_any_day, num_days).
-    """
     if not slots:
         return 0, 0
     maxslot = 0
@@ -203,15 +174,14 @@ def get_max_slot(slots: List[Dict[str, str]]) -> Tuple[int, int]:
 
 
 # --- Determine non-consecutive slots (TimeConse) ---
+
+
 def time_consecutive(slots: List[Dict[str, str]]) -> List[int]:
-    """
-    Returns a list where index i is 1 if slot i is non-consecutive with previous,
-    else 0. slots are dicts with 'day' and 'time' 'H1-H2'.
-    """
     n = len(slots)
     conslot: List[int] = [1] * n
     for i in range(n - 1):
-        day1, day2 = slots[i]["day"], slots[i + 1]["day"]
+        day1 = slots[i]["day"]
+        day2 = slots[i + 1]["day"]
         end1 = int(slots[i]["time"].split("-")[1])
         start2 = int(slots[i + 1]["time"].split("-")[0])
         if day1 == day2 and end1 != start2:
@@ -248,7 +218,33 @@ def get_course_name(idx: int) -> str:
     return course_list[idx] if 0 <= idx < len(course_list) else str(idx)
 
 
-# --- Student & Lecturer list functions ---
+# --- Initialize course structures (IniCostruct) ---
+
+
+def init_constructors(
+    lec_info: Dict[str, Dict[str, int]], lec_sizes: Dict[str, Dict[str, int]]
+) -> None:
+    global chromos, CHOLEN
+    n = TOTALCOURSE + 1
+    chromos = [{"lec": 0, "tut": 0, "from": 0, "to": 0} for _ in range(n)]
+    for code, data in lec_info.items():
+        idx = course_map.get(code)
+        if idx is None:
+            raise ValueError(f"[init_constructors] Invalid course code: {code}")
+        chromos[idx]["lec"] = data["lec_count"]
+        chromos[idx]["tut"] = data["tut_count"]
+    for i in range(n):
+        if i == 0:
+            chromos[i]["from"] = 0
+        else:
+            chromos[i]["from"] = chromos[i - 1]["to"] + 1
+        chromos[i]["to"] = (
+            chromos[i]["from"] + chromos[i]["lec"] + chromos[i]["tut"] - 1
+        )
+    CHOLEN = chromos[TOTALCOURSE]["to"] + 1
+
+
+# --- Convert and write student list (fillstudentlist) ---
 
 
 def fill_student_list(studentfile: str, output_file: str = "student.bin") -> None:
@@ -272,6 +268,9 @@ def fill_student_list(studentfile: str, output_file: str = "student.bin") -> Non
             fout.write(b"&")
     except IOError as e:
         raise RuntimeError(f"[fill_student_list] IO error: {e}")
+
+
+# --- Convert and write lecturer list (filllecturerlist) ---
 
 
 def fill_lecturer_list(
@@ -325,8 +324,7 @@ def create_list_of_file(
             name = get_course_name(code)
             flist.write(f"{name}$\t\t{code}$\n")
             fnum.write(f"{code}\t{name}\t\t{counts[code]}\n")
-            credit_line = credit_func(code, name)
-            fcred.write(f"{credit_line}\n")
+            fcred.write(f"{credit_func(code, name)}\n")
     print(f"\n\tThe {list_filename} file is created")
     print(f"\n\tThe {num_filename} file is created")
     print(f"\n\tThe {credit_filename} file is created")
@@ -442,6 +440,68 @@ def repair(chromosome: List[int], clash_tables: List[List[int]]) -> List[int]:
     return chromosome
 
 
+# --- Fill already scheduled courses (IniAschCos) ---
+
+
+def init_chorec(cos, slots, code, slot_str, cho, nslot, popsize, lecture: bool) -> None:
+    # Placeholder for assigning a pre-specified slot string to the chromosomes
+    pass
+
+
+def init_asch_cos(
+    scheslotfile: str,
+    cos: List[Dict[str, int]],
+    slots: List[Dict[str, str]],
+    cho: List[List[int]],
+    nslot: int,
+    popsize: int,
+) -> None:
+    try:
+        with open(scheslotfile, "r") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("&")
+                coursename = parts[0].upper()
+                lec, tut = parts[1], parts[2]
+                code = course_map.get(coursename)
+                if code is None:
+                    raise ValueError(
+                        f"[init_asch_cos] Invalid course code: {coursename}"
+                    )
+                if lec != "X":
+                    init_chorec(
+                        cos, slots, code, lec, cho, nslot, popsize, lecture=True
+                    )
+                if tut != "X":
+                    init_chorec(
+                        cos, slots, code, tut, cho, nslot, popsize, lecture=False
+                    )
+    except IOError as e:
+        raise RuntimeError(f"[init_asch_cos] Could not open {scheslotfile}: {e}")
+
+
+# --- Initialize chromosomes randomly (InitChos) ---
+
+
+def init_chos(
+    cos: List[Dict[str, int]],
+    clashtable: List[List[int]],
+    cho: List[List[int]],
+    fixslot: List[int],
+    popsize: int,
+    nslot: int,
+) -> None:
+    for row in range(popsize):
+        for col in range(len(cho[row])):
+            cho[row][col] = -1
+    random.seed()
+    for row in range(popsize):
+        for col in range(len(cho[row])):
+            cho[row][col] = random.randrange(nslot)
+
+
 # --- Main scheduling function ---
 def schedule():
     t_start = time.time()
@@ -456,29 +516,30 @@ def schedule():
     gensize, popsize = 10, 10
     choice = 1
     c_rate, m_rate, v_rate = 0.6, 0.08, 0.2
-    # Read inputs
+    # Read and prepare data
     generate_course_code(student_file)
+    print(f"Total courses: {TOTALCOURSE + 1}")
     fill_student_list(student_file)
-    lec_map = fill_lecturer_list(lecturer_file)
+    lecturer_map = fill_lecturer_list(lecturer_file)
     lec_sizes = read_lecsize_file(lecsize_file)
     lec_info = read_lec_file(lec_file)
     slots, total_slots = read_timeslot_file(timeslot_file)
     penalties = {k: read_penalty_file(v) for k, v in penalty_files.items()}
-    print(f"Total courses: {TOTALCOURSE + 1}")
-    # Initialize course structs
     init_constructors(lec_info, lec_sizes)
-    # Create auxiliary files
     create_list_of_file(student_file, lambda c, n: f"{c}\t{n}\t<credit>")
     # Build clash table
     n = TOTALCOURSE + 1
-    clashtable = [[0] * n for _ in range(n)]
+    clashtable = dyn_array(n, n)
     student_clash(clashtable, filename="student.bin")
-    lecturer_clash(clashtable, lec_map)
+    lecturer_clash(clashtable, lecturer_map)
     display_clash(clashtable, TOTALCOURSE)
-    # GA population initialization
-    population = [[-1] * CHOLEN for _ in range(popsize)]
-    random.seed()
-    # GA main loop
+    # Initialize population
+    cho = dyn_array(popsize, CHOLEN)
+    fixslot = int_struct(CHOLEN)
+    init_asch_cos("", chromos, slots, cho, total_slots, popsize)
+    init_chos(chromos, clashtable, cho, fixslot, popsize, total_slots)
+    # GA main loop (simplified)
+    population = cho
     for gen in range(gensize):
         fitnesses = [random.random() for _ in population]
         new_pop = []
@@ -495,15 +556,9 @@ def schedule():
                     break
         population = new_pop
         print(f"Generation {gen+1}/{gensize} complete")
-    # Extract best solution
+    # Finalize
     best = max(population, key=lambda _: random.random())
-    best_fit = random.random()
-    print(f"Best fitness: {best_fit:.4f}")
-    # Save schedule
-    out_file = "schedule_out.txt"
-    with open(out_file, "w") as f:
-        f.write(str(best))
-    print(f"Schedule written to {out_file}")
+    print(f"Best individual: {best}")
     print(f"Elapsed: {time.time() - t_start:.2f}s")
 
 
