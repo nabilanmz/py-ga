@@ -74,6 +74,47 @@ def read_lecsize_file(filename: str) -> Dict[str, Dict[str, int]]:
     return sizes
 
 
+# =============================================================================
+#  Read lecture and tutorial size into arrays (ReadLecTutsize)
+# =============================================================================
+def read_lec_tut_size(lecsizefile: str) -> Tuple[List[int], List[int]]:
+    """
+    Read lecture/tutorial sizes per course into parallel lists Lec and Tut.
+    """
+    n = TOTALCOURSE + 1
+    Lec = [0] * n
+    Tut = [0] * n
+    with open(lecsizefile, "r") as f:
+        for raw in f:
+            line = raw.strip().rstrip("$")
+            if not line or line.startswith("#"):
+                continue
+            parts = [p for p in line.split("$") if p]
+            coursename, lecsize, tutsize = parts
+            code = course_map.get(coursename.upper())
+            if code is None:
+                raise ValueError(
+                    f"[read_lec_tut_size] Invalid course code: {coursename}"
+                )
+            Lec[code] = int(lecsize)
+            Tut[code] = int(tutsize)
+    return Lec, Tut
+
+    sizes: Dict[str, Dict[str, int]] = {}
+    with open(filename, "r") as f:
+        for raw in f:
+            line = raw.strip().rstrip("$").lower()
+            if not line:
+                continue
+            parts = [p for p in line.split("$") if p]
+            code, capacity, tut_group = parts
+            sizes[code.upper()] = {
+                "capacity": int(capacity),
+                "tut_group_size": int(tut_group),
+            }
+    return sizes
+
+
 #  read_lec_file: parse lec.dat
 
 
@@ -733,7 +774,244 @@ def get_free_slots(
 
 
 # =============================================================================
+#  CONVERT THE CHROMOSON STRUCTURE INTO READABLE TIMETABLE FORMAT (CreateTimeTable)
+# =============================================================================
+def create_time_table(
+    out,  # file-like to write to
+    cos: List[Dict[str, int]],
+    slots: List[Dict[str, str]],
+    cho: List[int],
+    nslot: int,
+    mday: int,
+    lecsize: List[int],
+    tutsize: List[int],
+    title: str,
+) -> None:
+    """
+    Outputs a formatted timetable grid showing lectures and tutorials per day/time.
+    """
+    # build slotable map
+    slotable = [0] * CHOLEN
+    out.write(f"{title}")
+    # header lines
+    out.write("-------------" + "---------------" * mday + "")
+    out.write("|	")
+    days = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
+    for d in days[:mday]:
+        out.write(f"|      {d}      ")
+    out.write("|")
+    out.write("-------------" + "---------------" * mday + "")
+    # time labels
+    tp = ["8-9", "9-10", "10-11", "11-12", "12-1", "1-2", "2-3", "3-4", "4-5"]
+    for i in range(nslot):
+        counts = 0
+        cntlf = 0
+        out.write(f"|{tp[i]}")
+        # mark slots used this time
+        for col in range(CHOLEN):
+            if slots[cho[col]]["time"].startswith(tp[i]):
+                slotable[col] = 1
+                counts += 1
+        if counts == 0:
+            for day in range(mday):
+                if day == 0:
+                    out.write("	") if cntlf == 0 else out.write("")
+                    cntlf = 1
+                out.write("|               ")
+            out.write("|")
+        else:
+            while counts:
+                for day in range(mday):
+                    code = 0
+                    if day == 0:
+                        out.write("	") if cntlf == 0 else out.write("")
+                        cntlf = 1
+                    cntl = False
+                    for col in range(CHOLEN):
+                        gpos = cho[col]
+                        if col > cos[code]["to"]:
+                            code += 1
+                        if slotable[col] and slots[gpos]["day"] == days[day]:
+                            cntl = True
+                            slotable[col] = 0
+                            counts -= 1
+                            break
+                    if cntl:
+                        name = get_course_name(code)
+                        if col <= cos[code]["from"] + cos[code]["lec"] - 1:
+                            out.write(f"|{name}(L)[{lecsize[code]:3d}]")
+                        else:
+                            out.write(f"|{name}(T)[{tutsize[code]:3d}]")
+                    else:
+                        out.write("|               ")
+                out.write("|")
+        out.write("-------------" + "---------------" * mday + "")
+    out.write("\n")
+
+
+# =============================================================================
+#  CONVERT THE CHROMOSON STRUCTURE INTO READABLE SLOT LIST (CreateSlotTable)
+# =============================================================================
+def create_slot_table(
+    out,  # file-like to write to
+    cos: List[Dict[str, int]],
+    slots: List[Dict[str, str]],
+    cho: List[int],
+    Lecsize: List[int],
+    Tutsize: List[int],
+    nslot: int,
+    code: int,
+) -> None:
+    """
+    Outputs lecture and tutorial times for a single course code in a list format.
+    """
+    name = get_course_name(code)
+    out.write(f"{name}")
+    # Lectures
+    if cos[code]["lec"]:
+        i = 0
+        gpos = 0
+        out.write(f"Lec ({Lecsize[code]:3d})")
+        while i < nslot and gpos < cos[code]["lec"]:
+            for pos in range(cos[code]["from"], cos[code]["from"] + cos[code]["lec"]):
+                if cho[pos] == i:
+                    out.write(f"  {slots[i]['day']} {slots[i]['time']:>5}")
+                    gpos += 1
+                    if gpos % 4 == 0:
+                        out.write("")
+            i += 1
+    # Tutorials
+    if cos[code]["tut"]:
+        i = 0
+        gpos = 0
+        out.write(f"Tut ({Tutsize[code]:3d})")
+        while i < nslot and gpos < cos[code]["tut"]:
+            for pos in range(cos[code]["from"] + cos[code]["lec"], cos[code]["to"] + 1):
+                if cho[pos] == i:
+                    out.write(f"  {slots[i]['day']} {slots[i]['time']:>5}")
+                    gpos += 1
+                    if gpos % 6 == 0:
+                        out.write("")
+            i += 1
+    out.write("")
+
+
+# =============================================================================
+#  DISPLAY TIMETABLE FOR EVERY LECTURER (Lecturer_Timetable)
+# =============================================================================
+def lecturer_timetable(
+    out,  # file-like
+    cos: List[Dict[str, int]],
+    slots: List[Dict[str, str]],
+    cho: List[int],
+    Lecsize: List[int],
+    Tutsize: List[int],
+    nslot: int,
+    lecturer_map: Dict[str, List[str]],
+) -> None:
+    """
+    Print each lecturer's personal timetable by listing slots for their courses.
+    lecturer_map: {COURSE_CODE: [lecturer_names]}
+    """
+    # Invert mapping to {lecturer: [course_indices]}
+    lec_to_courses: Dict[str, List[int]] = {}
+    for course_code, names in lecturer_map.items():
+        idx = course_map.get(course_code)
+        if idx is None:
+            continue
+        for name in names:
+            lec_to_courses.setdefault(name, []).append(idx)
+
+    out.write("\n**********************************************************\n")
+    out.write("	*            The timetable for every lecturer            *")
+    out.write("	**********************************************************")
+
+    if not lec_to_courses:
+        out.write("[lecturer_timetable] No lecturers found!")
+        return
+
+    for lecturer, courses in lec_to_courses.items():
+        out.write(f"{lecturer}")
+        out.write("*" * len(lecturer) + "")
+        for code in courses:
+            create_slot_table(out, cos, slots, cho, Lecsize, Tutsize, nslot, code)
+        out.write("")
+
+
+# =============================================================================
 #  Main scheduling function
+# =============================================================================
+def schedule():
+    t_start = time.time()
+    # File names
+    student_file = "student.dat"
+    lecturer_file = "lecturer.dat"
+    lecsize_file = "lecsize.dat"
+    timeslot_file = "timeslot"
+    lec_file = "lec.dat"
+    penalty_files = {"crs": "crs", "tv": "tv", "staff": "staff", "course": "course"}
+
+    # GA parameters
+    gensize, popsize = 10, 10
+    choice = 1
+    c_rate, m_rate, v_rate = 0.6, 0.08, 0.2
+
+    # Read and prepare data
+    generate_course_code(student_file)
+    print(f"Total courses: {TOTALCOURSE + 1}")
+    fill_student_list(student_file)
+    lecturer_map = fill_lecturer_list(lecturer_file)
+    lec_sizes, tut_sizes = read_lec_tut_size(lecsize_file)
+    lec_info = read_lec_file(lec_file)
+    slots, total_slots = read_timeslot_file(timeslot_file)
+    penalties = {k: read_penalty_file(v) for k, v in penalty_files.items()}
+    init_constructors(lec_info, {"": {}})  # adjust as needed
+
+    # Create auxiliary files
+    create_list_of_file(student_file, lambda c, n: f"{c}	{n}	<credit>")
+
+    # Build clash table
+    n = TOTALCOURSE + 1
+    clashtable = dyn_array(n, n)
+    student_clash(clashtable, filename="student.bin")
+    lecturer_clash(clashtable, lecturer_map)
+    display_clash(clashtable, TOTALCOURSE)
+
+    # Initialize population
+    cho = dyn_array(popsize, CHOLEN)
+    fixslot = int_struct(CHOLEN)
+    init_asch_cos("", chromos, slots, cho, total_slots, popsize)
+    init_chos(chromos, clashtable, cho, fixslot, popsize, total_slots)
+
+    # GA main loop (simplified)
+    population = cho
+    for gen in range(gensize):
+        fitnesses = [random.random() for _ in population]
+        new_pop = []
+        while len(new_pop) < popsize:
+            if choice == 1:
+                parents = select_parents(population, fitnesses, 2)
+                children = crossover(parents[0], parents[1])
+            else:
+                p1 = select_parents(population, fitnesses, 1)[0]
+                children = [mutate(p1, m_rate, total_slots)]
+            for child in children:
+                new_pop.append(repair(child, clashtable))
+                if len(new_pop) >= popsize:
+                    break
+        population = new_pop
+        print(f"Generation {gen+1}/{gensize} complete")
+
+    # Finalize
+    best = max(population, key=lambda _: random.random())
+    print(f"Best individual: {best}")
+    print(f"Elapsed: {time.time() - t_start:.2f}s")
+
+
+if __name__ == "__main__":
+    schedule()
+
+
 # =============================================================================
 def schedule():
     t_start = time.time()
