@@ -5,7 +5,9 @@ import os
 from typing import List, Dict, Tuple, Callable
 
 
-# --- Dynamic array & int struct helpers ---
+# =============================================================================
+#  DYNAMIC ARRAY & INT STRUCT HELPERS (DynArray / intstruct)
+# =============================================================================
 def dyn_array(rows: int, cols: int) -> List[List[int]]:
     """
     Create a 2D list of zeros with the given dimensions.
@@ -20,7 +22,10 @@ def int_struct(size: int) -> List[int]:
     return [0] * size
 
 
-# --- File parsing utilities ---
+# =============================================================================
+#  FILE PARSING UTILITIES
+# =============================================================================
+#  read_student_file: parse student.dat
 
 
 def read_student_file(filename: str) -> List[List[str]]:
@@ -30,6 +35,9 @@ def read_student_file(filename: str) -> List[List[str]]:
         return []
     records = data.split()
     return [[course for course in rec.split("$") if course] for rec in records]
+
+
+#  read_lecturer_file: parse lecturer.dat
 
 
 def read_lecturer_file(filename: str) -> Dict[str, List[str]]:
@@ -45,6 +53,9 @@ def read_lecturer_file(filename: str) -> Dict[str, List[str]]:
             names = [name for name in rest.split("$") if name]
             lecturers[course_code] = names
     return lecturers
+
+
+#  read_lecsize_file: parse lecsize.dat
 
 
 def read_lecsize_file(filename: str) -> Dict[str, Dict[str, int]]:
@@ -63,6 +74,9 @@ def read_lecsize_file(filename: str) -> Dict[str, Dict[str, int]]:
     return sizes
 
 
+#  read_lec_file: parse lec.dat
+
+
 def read_lec_file(filename: str) -> Dict[str, Dict[str, int]]:
     lec: Dict[str, Dict[str, int]] = {}
     with open(filename, "r") as f:
@@ -74,6 +88,9 @@ def read_lec_file(filename: str) -> Dict[str, Dict[str, int]]:
             code, lec_cnt, tut_cnt = parts
             lec[code.upper()] = {"lec_count": int(lec_cnt), "tut_count": int(tut_cnt)}
     return lec
+
+
+#  read_timeslot_file: parse timeslot, also return TOTAL
 
 
 def read_timeslot_file(filename: str) -> Tuple[List[Dict[str, str]], int]:
@@ -99,6 +116,9 @@ def read_timeslot_file(filename: str) -> Tuple[List[Dict[str, str]], int]:
     return slots, total
 
 
+#  read_penalty_file: parse penalty files
+
+
 def read_penalty_file(filename: str) -> Dict[int, int]:
     penalty: Dict[int, int] = {}
     with open(filename, "r") as f:
@@ -111,9 +131,9 @@ def read_penalty_file(filename: str) -> Dict[int, int]:
     return penalty
 
 
-# --- Get TOTAL: count from a file (Getotal) ---
-
-
+# =============================================================================
+#  GETOTAL: retrieve integer after "TOTAL:" in file
+# =============================================================================
 def get_total(filename: str) -> int:
     try:
         with open(filename, "r") as f:
@@ -129,9 +149,9 @@ def get_total(filename: str) -> int:
     return -1
 
 
-# --- Initialize time slot structure (Initimeslot) ---
-
-
+# =============================================================================
+#  INITIMESLOT: initialize time slots from file
+# =============================================================================
 def init_time_slot(filename: str) -> List[Dict[str, str]]:
     slots: List[Dict[str, str]] = []
     try:
@@ -150,9 +170,9 @@ def init_time_slot(filename: str) -> List[Dict[str, str]]:
     return slots
 
 
-# --- Determine maximum slots per day (GetMaxSlot) ---
-
-
+# =============================================================================
+#  GETMAXSLOT: determine max slots per day and number of days
+# =============================================================================
 def get_max_slot(slots: List[Dict[str, str]]) -> Tuple[int, int]:
     if not slots:
         return 0, 0
@@ -173,9 +193,9 @@ def get_max_slot(slots: List[Dict[str, str]]) -> Tuple[int, int]:
     return maxslot, maxday
 
 
-# --- Determine non-consecutive slots (TimeConse) ---
-
-
+# =============================================================================
+#  TIMECONSE: mark non-consecutive time slots
+# =============================================================================
 def time_consecutive(slots: List[Dict[str, str]]) -> List[int]:
     n = len(slots)
     conslot: List[int] = [1] * n
@@ -189,7 +209,14 @@ def time_consecutive(slots: List[Dict[str, str]]) -> List[int]:
     return conslot
 
 
-# --- Course code mapping ---
+# =============================================================================
+#  GLOBAL DATA & GENERATE_COURSE_CODE
+# =============================================================================
+TOTALCOURSE = 0
+course_map: Dict[str, int] = {}
+course_list: List[str] = []
+chromos: List[Dict[str, int]] = []
+CHOLEN = 0
 
 
 def generate_course_code(coursefile: str) -> Dict[str, int]:
@@ -211,16 +238,16 @@ def generate_course_code(coursefile: str) -> Dict[str, int]:
     return course_map
 
 
-# --- Course name lookup ---
-
-
+# =============================================================================
+#  GET_COURSENAME: name lookup by index
+# =============================================================================
 def get_course_name(idx: int) -> str:
     return course_list[idx] if 0 <= idx < len(course_list) else str(idx)
 
 
-# --- Initialize course structures (IniCostruct) ---
-
-
+# =============================================================================
+#  IniCostruct: initialize chromos from lec/tut info
+# =============================================================================
 def init_constructors(
     lec_info: Dict[str, Dict[str, int]], lec_sizes: Dict[str, Dict[str, int]]
 ) -> None:
@@ -244,35 +271,9 @@ def init_constructors(
     CHOLEN = chromos[TOTALCOURSE]["to"] + 1
 
 
-# --- Convert and write student list (fillstudentlist) ---
-
-
-def fill_student_list(studentfile: str, output_file: str = "student.bin") -> None:
-    try:
-        with open(studentfile, "r") as fin, open(output_file, "wb") as fout:
-            for raw in fin:
-                line = raw.rstrip("\n")
-                if not line or line.startswith("#"):
-                    continue
-                parts = [p for p in line.split("$") if p]
-                buf_parts: List[str] = []
-                for coursename in parts[1:]:
-                    code = course_map.get(coursename.upper())
-                    if code is None:
-                        raise ValueError(
-                            f"[fill_student_list] Invalid course code: {coursename}"
-                        )
-                    buf_parts.append(str(code))
-                buf = " ".join(buf_parts) + "$"
-                fout.write(buf.encode("ascii"))
-            fout.write(b"&")
-    except IOError as e:
-        raise RuntimeError(f"[fill_student_list] IO error: {e}")
-
-
-# --- Convert and write lecturer list (filllecturerlist) ---
-
-
+# =============================================================================
+#  filllecturerlist: write CourseLecturer.o and build lecturer_map
+# =============================================================================
 def fill_lecturer_list(
     lecturerfile: str, output_file: str = "CourseLecturer.o"
 ) -> Dict[str, List[str]]:
@@ -299,9 +300,35 @@ def fill_lecturer_list(
     return lecturer_map
 
 
-# --- Create ListOfCourse, NumOfStudent, CourseCredit ---
+# =============================================================================
+#  fillstudentlist: write student.bin from student.dat
+# =============================================================================
+def fill_student_list(studentfile: str, output_file: str = "student.bin") -> None:
+    try:
+        with open(studentfile, "r") as fin, open(output_file, "wb") as fout:
+            for raw in fin:
+                line = raw.rstrip("\n")
+                if not line or line.startswith("#"):
+                    continue
+                parts = [p for p in line.split("$") if p]
+                buf_parts: List[str] = []
+                for coursename in parts[1:]:
+                    code = course_map.get(coursename.upper())
+                    if code is None:
+                        raise ValueError(
+                            f"[fill_student_list] Invalid course code: {coursename}"
+                        )
+                    buf_parts.append(str(code))
+                buf = " ".join(buf_parts) + "$"
+                fout.write(buf.encode("ascii"))
+            fout.write(b"&")
+    except IOError as e:
+        raise RuntimeError(f"[fill_student_list] IO error: {e}")
 
 
+# =============================================================================
+#  Create_List_Of_File: ListOfCourse.o, NumOfStudent.o, CourseCredit.o
+# =============================================================================
 def create_list_of_file(
     studentfile: str,
     credit_func: Callable[[int, str], str],
@@ -330,9 +357,9 @@ def create_list_of_file(
     print(f"\n\tThe {credit_filename} file is created")
 
 
-# --- Clash detection functions ---
-
-
+# =============================================================================
+#  LecturerClash: record clashes based on same lecturer
+# =============================================================================
 def lecturer_clash(
     clashtable: List[List[int]], lecturer_map: Dict[str, List[str]]
 ) -> None:
@@ -351,6 +378,9 @@ def lecturer_clash(
                 clashtable[b][a] = 1
 
 
+# =============================================================================
+#  StudentClash: record clashes based on same student
+# =============================================================================
 def student_clash(clashtable: List[List[int]], filename: str = "student.bin") -> None:
     with open(filename, "rb") as f:
         data = f.read().decode("ascii", errors="ignore")
@@ -377,6 +407,9 @@ def student_clash(clashtable: List[List[int]], filename: str = "student.bin") ->
             buf += c
 
 
+# =============================================================================
+#  Display_clash: write CodeClash.o and CourseClash.o
+# =============================================================================
 def display_clash(
     clashtable: List[List[int]],
     total_course: int,
@@ -402,9 +435,9 @@ def display_clash(
     print(f"\n\tThe {name_file} file is created")
 
 
-# --- GA operators ---
-
-
+# =============================================================================
+#  GA OPERATORS: RoulWheel, ParentSelect, Crossover, Mutation, Repair
+# =============================================================================
 def roul_wheel(cumfitval: List[float], choice: float) -> int:
     for i, threshold in enumerate(cumfitval):
         if choice <= threshold:
@@ -440,11 +473,11 @@ def repair(chromosome: List[int], clash_tables: List[List[int]]) -> List[int]:
     return chromosome
 
 
-# --- Fill already scheduled courses (IniAschCos) ---
-
-
+# =============================================================================
+#  IniAschCos: initialize chromosomes with already scheduled courses
+# =============================================================================
 def init_chorec(cos, slots, code, slot_str, cho, nslot, popsize, lecture: bool) -> None:
-    # Placeholder for assigning a pre-specified slot string to the chromosomes
+    # TODO: implement assignment of pre-defined slot strings to chromosomes
     pass
 
 
@@ -482,9 +515,9 @@ def init_asch_cos(
         raise RuntimeError(f"[init_asch_cos] Could not open {scheslotfile}: {e}")
 
 
-# --- Initialize chromosomes randomly (InitChos) ---
-
-
+# =============================================================================
+#  InitChos: initialize chromosomes randomly with constraints
+# =============================================================================
 def init_chos(
     cos: List[Dict[str, int]],
     clashtable: List[List[int]],
@@ -502,7 +535,45 @@ def init_chos(
             cho[row][col] = random.randrange(nslot)
 
 
-# --- Main scheduling function ---
+# =============================================================================
+#  getfreeslot: detect free slots for a course item
+# =============================================================================
+def get_free_slots(
+    clashtable: List[List[int]],
+    cos: List[Dict[str, int]],
+    cho: List[int],
+    code: int,
+    col: int,
+    nslot: int,
+) -> List[int]:
+    clashslot = [0] * nslot
+    for cpos in range(TOTALCOURSE + 1):
+        if cpos == code:
+            continue
+        if clashtable[cpos][code]:
+            for gpos in range(cos[cpos]["from"], cos[cpos]["to"] + 1):
+                if (
+                    col > cos[code]["from"] + cos[code]["lec"] - 1
+                    and gpos > cos[cpos]["from"] + cos[cpos]["lec"] - 1
+                ):
+                    break
+                slot = cho[gpos]
+                if slot >= 0:
+                    clashslot[slot] = 1
+    for gpos in range(cos[code]["from"], cos[code]["to"] + 1):
+        slot = cho[gpos]
+        if slot == -1 and gpos == col:
+            continue
+        if slot >= 0:
+            clashslot[slot] = 1
+    freeslot = [tpos for tpos in range(nslot) if clashslot[tpos] == 0]
+    print("sasalskalsalsla")
+    return freeslot
+
+
+# =============================================================================
+#  Main scheduling function
+# =============================================================================
 def schedule():
     t_start = time.time()
     # File names
@@ -512,10 +583,12 @@ def schedule():
     timeslot_file = "timeslot"
     lec_file = "lec.dat"
     penalty_files = {"crs": "crs", "tv": "tv", "staff": "staff", "course": "course"}
+
     # GA parameters
     gensize, popsize = 10, 10
     choice = 1
     c_rate, m_rate, v_rate = 0.6, 0.08, 0.2
+
     # Read and prepare data
     generate_course_code(student_file)
     print(f"Total courses: {TOTALCOURSE + 1}")
@@ -526,18 +599,23 @@ def schedule():
     slots, total_slots = read_timeslot_file(timeslot_file)
     penalties = {k: read_penalty_file(v) for k, v in penalty_files.items()}
     init_constructors(lec_info, lec_sizes)
+
+    # Create auxiliary files
     create_list_of_file(student_file, lambda c, n: f"{c}\t{n}\t<credit>")
+
     # Build clash table
     n = TOTALCOURSE + 1
     clashtable = dyn_array(n, n)
     student_clash(clashtable, filename="student.bin")
     lecturer_clash(clashtable, lecturer_map)
     display_clash(clashtable, TOTALCOURSE)
+
     # Initialize population
     cho = dyn_array(popsize, CHOLEN)
     fixslot = int_struct(CHOLEN)
     init_asch_cos("", chromos, slots, cho, total_slots, popsize)
     init_chos(chromos, clashtable, cho, fixslot, popsize, total_slots)
+
     # GA main loop (simplified)
     population = cho
     for gen in range(gensize):
@@ -556,6 +634,7 @@ def schedule():
                     break
         population = new_pop
         print(f"Generation {gen+1}/{gensize} complete")
+
     # Finalize
     best = max(population, key=lambda _: random.random())
     print(f"Best individual: {best}")
