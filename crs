@@ -1,0 +1,13 @@
+#This file contains a list of penalties for each of following constraints
+#Data format consists of two fields:
+#Number of course per day$Penalty value$
+#'$' is a field delimiter 
+1$0$
+2$3$
+3$5$
+4$10$
+5$25$
+6$40$
+7$50$
+8$70$
+9$80$
