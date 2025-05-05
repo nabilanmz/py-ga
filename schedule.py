@@ -610,7 +610,94 @@ def init_chos(
 
 
 # =============================================================================
+#  Backtracking: try swapping slots to resolve clashes
+# =============================================================================
+def backtracking(
+    clashtable: List[List[int]],
+    cos: List[Dict[str, int]],
+    cho: List[int],
+    Fixslot: List[int],
+    code: int,
+    col: int,
+    nslot: int,
+) -> bool:
+    """
+    Attempt to resolve clashes by swapping current gene at col with another slot.
+    Returns True if successful, False otherwise.
+    """
+    # initialize helper arrays
+    timeslot = int_struct(nslot)
+    freeslot = int_struct(nslot)
+    tmpcho = list(cho)  # copy
+    tmpslot = int_struct(nslot)
+
+    # count clashes per timeslot from other courses
+    for cpos in range(TOTALCOURSE + 1):
+        if cpos == code:
+            continue
+        if clashtable[cpos][code]:
+            for gpos in range(cos[cpos]["from"], cos[cpos]["to"] + 1):
+                sl = tmpcho[gpos]
+                if sl == -1:
+                    continue
+                # skip if both are tutorials and beyond lecture range
+                if (
+                    col > cos[code]["from"] + cos[code]["lec"] - 1
+                    and gpos > cos[cpos]["from"] + cos[cpos]["lec"] - 1
+                ):
+                    continue
+                timeslot[sl] += 1
+    # count self-clashes
+    for gpos in range(cos[code]["from"], cos[code]["to"] + 1):
+        sl = tmpcho[gpos]
+        if sl == -1:
+            continue
+        timeslot[sl] += 1
+
+    NumofClash = 1
+    NumofSlot = 0
+    # attempt increasing clash levels
+    while NumofSlot < nslot:
+        # collect slots with exactly NumofClash clashes
+        tpos = 0
+        for pos in range(nslot):
+            if timeslot[pos] == NumofClash:
+                tmpslot[tpos] = pos
+                tpos += 1
+        # try each candidate
+        while tpos:
+            randslot = random.randrange(tpos)
+            cntl = True
+            npos = 0
+            # for each gene, if matches candidate, try swap
+            for gpos in range(CHOLEN):
+                if tmpcho[gpos] != tmpslot[randslot]:
+                    continue
+                # find alternative free slots for this gpos
+                frees = get_free_slots(clashtable, cos, tmpcho, code, gpos, nslot)
+                if not frees:
+                    cntl = False
+                    break
+                # perform swap
+                tmpcho[col], tmpcho[gpos] = tmpcho[gpos], random.choice(frees)
+                npos += 1
+                if npos >= NumofClash:
+                    break
+            if cntl and npos:
+                # commit
+                cho[:] = tmpcho
+                return True
+            # remove this candidate and continue
+            tmpslot[randslot : tpos - 1] = tmpslot[randslot + 1 : tpos]
+            tpos -= 1
+            NumofSlot += NumofClash
+        NumofClash += 1
+    return False
+
+
+# =============================================================================
 #  getfreeslot: detect free slots for a course item
+# =============================================================================
 # =============================================================================
 def get_free_slots(
     clashtable: List[List[int]],
