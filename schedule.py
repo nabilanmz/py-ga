@@ -477,6 +477,37 @@ def repair(chromosome: List[int], clash_tables: List[List[int]]) -> List[int]:
 #  IniAschCos: initialize chromosomes with already scheduled courses
 # =============================================================================
 # =============================================================================
+#  CONVERT PARTIAL TIME STRING TO 'DAY TIME' (partialconvert)
+# =============================================================================
+def partial_convert(timeptr: str) -> str:
+    """
+    Convert a compact time record into standardized 'DAY TIME' format.
+    E.g. 'Mon 8-9'→'MON 8-9'. Splits on first space: day to uppercase, time unchanged.
+    """
+    parts = timeptr.strip().split(" ", 1)
+    if len(parts) == 2:
+        day, times = parts
+        return f"{day.upper()} {times}"
+    return timeptr.upper()
+
+
+# =============================================================================
+#  FIND TIME SLOT INDEX FOR A 'DAY TIME' STRING (Matchtimeslot)
+# =============================================================================
+def match_time_slot(str_times: str, slots: List[Dict[str, str]]) -> int:
+    """
+    Given 'DAY TIME', search slots list for matching entry and return its index.
+    Returns -1 if not found.
+    """
+    target = str_times.strip().upper()
+    for i, slot in enumerate(slots):
+        candidate = f"{slot['day']} {slot['time']}".upper()
+        if candidate.startswith(target):
+            return i
+    return -1
+
+
+# =============================================================================
 #  INITIALIZE COURSE TIMESLOT (Initchorec)
 # =============================================================================
 def init_chorec(
