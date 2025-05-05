@@ -476,9 +476,52 @@ def repair(chromosome: List[int], clash_tables: List[List[int]]) -> List[int]:
 # =============================================================================
 #  IniAschCos: initialize chromosomes with already scheduled courses
 # =============================================================================
-def init_chorec(cos, slots, code, slot_str, cho, nslot, popsize, lecture: bool) -> None:
-    # TODO: implement assignment of pre-defined slot strings to chromosomes
-    pass
+# =============================================================================
+#  INITIALIZE COURSE TIMESLOT (Initchorec)
+# =============================================================================
+def init_chorec(
+    cos: List[Dict[str, int]],
+    slots: List[Dict[str, str]],
+    coursecode: int,
+    rec: str,
+    cho: List[List[int]],
+    nslot: int,
+    popsize: int,
+    lecture: bool,
+) -> None:
+    """
+    Initialize already scheduled times for a course component.
+    rec: string of times separated by '$'
+    lecture: False for lecture, True for tutorial
+    """
+    # Determine index range for this course component
+    if lecture:
+        start = cos[coursecode]["from"] + cos[coursecode]["lec"]
+        length = cos[coursecode]["tut"]
+    else:
+        start = cos[coursecode]["from"]
+        length = cos[coursecode]["lec"]
+    end = start + length - 1
+
+    # Split the record string into individual time tokens
+    times = [t for t in rec.split("$") if t]
+    for t in times:
+        # Convert to standardized time string, e.g. '8-9'
+        timestr = partial_convert(
+            t
+        )  # You should implement partial_convert to match C partialconvert
+        if start > end:
+            raise ValueError("[init_chorec] Invalid range!")
+        # Find the corresponding slot index
+        timecode = match_time_slot(
+            timestr, slots
+        )  # Implement match_time_slot to mirror C Matchtimeslot
+        if timecode == -1:
+            raise ValueError("[init_chorec] Invalid time slot!")
+        # Assign this timecode to all chromosomes at the 'start' gene position
+        for row in range(popsize):
+            cho[row][start] = timecode
+        start += 1
 
 
 def init_asch_cos(
