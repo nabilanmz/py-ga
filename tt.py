@@ -16,6 +16,7 @@ START_HOUR = 8  # 8 AM
 END_HOUR = 18  # 6 PM
 TIME_STEP = 30  # 30-minute intervals
 MIN_CLASSES = 1  # Minimum number of classes per individual
+IDEAL_GAP = 90  # 1.5 hour ideal gap between same-subject classes (minutes)
 
 
 @dataclass
@@ -99,26 +100,32 @@ class Timetable:
             self.schedule[day][i] = class_obj
         return True
 
-    def get_lecturer_schedule(
-        self, lecturer: str
-    ) -> Dict[str, List[Tuple[time, time]]]:
-        """Get all time ranges when a lecturer is busy"""
-        busy_times = defaultdict(list)
+    def get_utilized_days(self) -> Set[str]:
+        """Get set of days that have at least one class"""
+        return {day for day in DAYS if any(self.schedule[day])}
+
+    def get_class_gaps(self) -> Dict[str, List[int]]:
+        """Calculate gaps between same-subject classes (in minutes)"""
+        subject_times = defaultdict(list)
         for day in DAYS:
-            current_start = None
-            current_end = None
             for i, slot in enumerate(self.time_slots):
-                if self.schedule[day][i] and self.schedule[day][i].lecturer == lecturer:
-                    if current_start is None:
-                        current_start = slot
-                    current_end = self.time_slots[min(i + 1, len(self.time_slots) - 1)]
-                else:
-                    if current_start is not None:
-                        busy_times[day].append((current_start, current_end))
-                        current_start = None
-            if current_start is not None:
-                busy_times[day].append((current_start, current_end))
-        return busy_times
+                if class_obj := self.schedule[day][i]:
+                    if (
+                        i == 0 or self.schedule[day][i - 1] != class_obj
+                    ):  # Only record start times
+                        subject_times[class_obj.subject].append(
+                            (day, datetime.combine(datetime.today(), slot))
+                        )
+
+        gaps = defaultdict(list)
+        for subject, times in subject_times.items():
+            # Sort by datetime
+            times.sort(key=lambda x: x[1])
+            for i in range(1, len(times)):
+                if times[i][0] == times[i - 1][0]:  # Same day
+                    gap = (times[i][1] - times[i - 1][1]).total_seconds() / 60
+                    gaps[subject].append(gap)
+        return gaps
 
 
 class TimetableGenerator:
@@ -260,7 +267,7 @@ class TimetableGenerator:
         return timetable
 
     def evaluate(self, individual: creator.Individual) -> Tuple[float]:
-        """Enhanced fitness function with duration awareness"""
+        """Enhanced fitness function with all constraints"""
         timetable = self.decode_timetable(individual)
         score = 0
         scheduled_counts = defaultdict(lambda: defaultdict(int))
@@ -280,13 +287,28 @@ class TimetableGenerator:
                         ).seconds // 60
                         lecturer_workload[class_obj.lecturer] += duration
 
-        # Hard constraints
+        # 1. Hard constraints (large penalties)
         for subject in self.subjects:
             for class_type, required in subject.required_count.items():
                 missing = max(0, required - scheduled_counts[subject.name][class_type])
                 score -= 1000 * missing
 
-        # Soft constraints
+        # 2. Fewer days used (condensed schedule)
+        utilized_days = timetable.get_utilized_days()
+        score += 50 * (5 - len(utilized_days))  # Reward for fewer days
+
+        # 3. Class spacing (not too tight or too far)
+        class_gaps = timetable.get_class_gaps()
+        for subject, gaps in class_gaps.items():
+            for gap in gaps:
+                # Reward gaps close to ideal, penalize others
+                gap_diff = abs(gap - IDEAL_GAP)
+                if gap_diff <= 30:  # Within 30 mins of ideal
+                    score += 20
+                elif gap_diff > 120:  # More than 2 hours off
+                    score -= 30
+
+        # 4. Lecturer workload balance
         if lecturer_workload:
             avg_workload = sum(lecturer_workload.values()) / len(lecturer_workload)
             for workload in lecturer_workload.values():
@@ -299,9 +321,8 @@ class TimetableGenerator:
     ) -> Tuple[creator.Individual, creator.Individual]:
         """Custom crossover that ensures valid individuals"""
         if len(ind1) < 6 or len(ind2) < 6:
-            return ind1, ind2  # Not enough material to crossover
+            return ind1, ind2
 
-        # Ensure crossover points are valid
         size = min(len(ind1), len(ind2))
         cxpoint1 = random.randint(1, size // 6) * 6  # Align with class boundaries
         cxpoint2 = random.randint(1, size // 6) * 6
@@ -376,11 +397,21 @@ class TimetableGenerator:
                 )
                 print(f"{subject.name} {class_type}: {scheduled}/{count}")
 
+        # Print schedule statistics
+        utilized_days = best.get_utilized_days()
+        class_gaps = best.get_class_gaps()
+        print(f"\nSchedule uses {len(utilized_days)} days: {', '.join(utilized_days)}")
+        print("Class gaps (minutes):")
+        for subject, gaps in class_gaps.items():
+            if gaps:
+                avg_gap = sum(gaps) / len(gaps)
+                print(f"{subject}: avg {avg_gap:.1f} mins (ideal: {IDEAL_GAP})")
+
         return best
 
 
 if __name__ == "__main__":
-    # Example configuration with varying durations
+    # Example configuration
     subjects = [
         Subject(
             "Math",
@@ -409,17 +440,16 @@ if __name__ == "__main__":
     best_timetable = generator.run(generations=100)
 
     # Print the timetable
-    print("\nOptimized Timetable with Variable Durations:")
+    print("\nOptimized Timetable:")
     for day in DAYS:
-        print(f"\n{day}:")
-        current_classes = set()
+        classes = set()
         for slot in best_timetable.time_slots:
-            class_obj = best_timetable.schedule[day][
+            if class_obj := best_timetable.schedule[day][
                 best_timetable.time_slots.index(slot)
-            ]
-            if class_obj and class_obj not in current_classes:
-                current_classes.add(class_obj)
-                print(
-                    f"{class_obj.start_time.strftime('%H:%M')}-{class_obj.end_time.strftime('%H:%M')}: "
-                    f"{class_obj.subject} ({class_obj.class_type}) with {class_obj.lecturer}"
-                )
+            ]:
+                if class_obj not in classes:
+                    classes.add(class_obj)
+                    print(
+                        f"{day} {class_obj.start_time.strftime('%H:%M')}-{class_obj.end_time.strftime('%H:%M')}: "
+                        f"{class_obj.subject} ({class_obj.class_type}) with {class_obj.lecturer}"
+                    )
