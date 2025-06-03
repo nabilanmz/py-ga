@@ -1,6 +1,6 @@
 import csv
 from dataclasses import dataclass
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Set
 from collections import defaultdict
 import random
 import numpy as np
@@ -35,11 +35,6 @@ class Class:
         start = datetime.combine(datetime.today(), self.start_time)
         end = datetime.combine(datetime.today(), self.end_time)
         return int((end - start).total_seconds() / 60)
-
-    @property
-    def possible_times(self) -> List[Dict[str, List[time]]]:
-        """Format for genetic algorithm compatibility"""
-        return [{self.days: [self.start_time]}]
 
 
 def load_classes_from_csv(filename: str) -> List[Class]:
@@ -80,24 +75,12 @@ def load_classes_from_csv(filename: str) -> List[Class]:
     return classes
 
 
-def get_course_requirements(classes: List[Class]) -> Dict[str, Dict[str, int]]:
-    """Generate course requirements based on available classes"""
-    requirements = defaultdict(lambda: defaultdict(int))
+def group_classes_by_section(classes: List[Class]) -> Dict[str, Dict[str, List[Class]]]:
+    """Group classes by course and section"""
+    section_groups = defaultdict(lambda: defaultdict(list))
     for cls in classes:
-        requirements[cls.course][cls.activity] += 1
-
-    # Convert to regular dict and set minimum requirements
-    return {
-        course: {
-            "Lecture": min(
-                1, counts.get("Lecture", 0)
-            ),  # At least 1 lecture if available
-            "Tutorial": min(
-                1, counts.get("Tutorial", 0)
-            ),  # At least 1 tutorial if available
-        }
-        for course, counts in requirements.items()
-    }
+        section_groups[cls.course][f"{cls.activity}_{cls.section}"].append(cls)
+    return section_groups
 
 
 @dataclass
@@ -112,73 +95,106 @@ class Timetable:
     def __init__(self):
         self.schedule = {day: [] for day in DAYS}
         self.scheduled_classes = []
+        self.scheduled_sections = defaultdict(
+            set
+        )  # Track scheduled sections per course
 
-    def add_class(self, scheduled_class: ScheduledClass) -> bool:
-        day = scheduled_class.day
-        start = scheduled_class.start_time
-        end = scheduled_class.end_time
+    def can_add_section(self, section_classes: List[Class]) -> bool:
+        """Check if we can add all classes in this section"""
+        first_class = section_classes[0]
+        activity_type = first_class.activity
 
-        # Check for overlapping classes
-        for existing in self.schedule[day]:
-            if not (end <= existing.start_time or start >= existing.end_time):
-                return False
+        # Check if we already have a section of this type for the course
+        for scheduled_section in self.scheduled_sections[first_class.course]:
+            if scheduled_section.startswith(activity_type):
+                return False  # Already have a section of this type
 
-        # Check lecturer availability (skip if lecturer not assigned)
-        lecturer = scheduled_class.class_obj.lecturer
-        if lecturer != "Not Assigned":
-            for existing in self.scheduled_classes:
-                if existing.class_obj.lecturer == lecturer:
-                    if not (end <= existing.start_time or start >= existing.end_time):
-                        return False
+        # Check time and lecturer conflicts
+        for cls in section_classes:
+            # Check time conflicts
+            for existing in self.schedule[cls.days]:
+                if not (
+                    cls.end_time <= existing.start_time
+                    or cls.start_time >= existing.end_time
+                ):
+                    return False
 
-        self.schedule[day].append(scheduled_class)
-        self.scheduled_classes.append(scheduled_class)
+            # Check lecturer conflicts (if lecturer is assigned)
+            if cls.lecturer != "Not Assigned":
+                for existing in self.scheduled_classes:
+                    if existing.class_obj.lecturer == cls.lecturer:
+                        if not (
+                            cls.end_time <= existing.start_time
+                            or cls.start_time >= existing.end_time
+                        ):
+                            return False
+
+        return True
+
+    def add_section(self, section_classes: List[Class]) -> bool:
+        """Add all classes in a section"""
+        if not self.can_add_section(section_classes):
+            return False
+
+        # Add all classes in the section
+        for cls in section_classes:
+            sc = ScheduledClass(
+                class_obj=cls,
+                day=cls.days,
+                start_time=cls.start_time,
+                end_time=cls.end_time,
+            )
+            self.schedule[cls.days].append(sc)
+            self.scheduled_classes.append(sc)
+
+        # Record that we've scheduled this section
+        first_class = section_classes[0]
+        self.scheduled_sections[first_class.course].add(
+            f"{first_class.activity}_{first_class.section}"
+        )
         return True
 
     def get_utilized_days(self) -> int:
         return sum(1 for day in DAYS if self.schedule[day])
-
-    def get_class_gaps(self) -> Dict[str, List[float]]:
-        subject_times = defaultdict(list)
-        for sc in self.scheduled_classes:
-            subject_times[sc.class_obj.course].append(
-                (sc.day, datetime.combine(datetime.today(), sc.start_time))
-            )
-
-        gaps = defaultdict(list)
-        for subject, times in subject_times.items():
-            times.sort(key=lambda x: x[1])
-            for i in range(1, len(times)):
-                if times[i][0] == times[i - 1][0]:  # Same day
-                    gap = (times[i][1] - times[i - 1][1]).total_seconds() / 60
-                    gaps[subject].append(gap)
-        return gaps
 
 
 class TimetableGenerator:
     def __init__(self, classes: List[Class], user_preferences: dict):
         self.classes = classes
         self.user_preferences = user_preferences
-        self.course_requirements = get_course_requirements(classes)
+        self.section_groups = group_classes_by_section(classes)
         self.setup_deap()
 
     def setup_deap(self):
         self.toolbox = base.Toolbox()
 
-        # Only consider classes for preferred courses
-        valid_classes = [
-            i
-            for i, cls in enumerate(self.classes)
-            if cls.course in self.user_preferences["courses"]
-        ]
+        # For each course, create lists of available lecture and tutorial sections
+        self.course_sections = defaultdict(lambda: defaultdict(list))
+        for course in self.user_preferences["courses"]:
+            if course in self.section_groups:
+                for section_key, section_classes in self.section_groups[course].items():
+                    activity = section_classes[0].activity
+                    self.course_sections[course][activity].append(section_classes)
 
-        self.toolbox.register("attr_bool", lambda: random.choice(valid_classes))
+        # Create a list of all possible section choices
+        self.section_choices = []
+        self.section_info = []  # Stores (course, activity, section_classes)
+
+        for course in self.user_preferences["courses"]:
+            for activity in ["Lecture", "Tutorial"]:
+                if activity in self.course_sections[course]:
+                    for section_classes in self.course_sections[course][activity]:
+                        self.section_choices.append((course, activity, section_classes))
+                        self.section_info.append((course, activity, section_classes))
+
+        # Each gene represents whether to include a section (0 or 1)
+        self.toolbox.register("attr_bool", random.randint, 0, 1)
         self.toolbox.register(
             "individual",
             tools.initRepeat,
             creator.Individual,
             self.toolbox.attr_bool,
-            n=len(self.classes),
+            n=len(self.section_choices),
         )
         self.toolbox.register(
             "population", tools.initRepeat, list, self.toolbox.individual
@@ -186,82 +202,90 @@ class TimetableGenerator:
 
         self.toolbox.register("evaluate", self.evaluate)
         self.toolbox.register("mate", tools.cxTwoPoint)
-        self.toolbox.register(
-            "mutate",
-            tools.mutUniformInt,
-            low=min(valid_classes),
-            up=max(valid_classes),
-            indpb=0.1,
-        )
+        self.toolbox.register("mutate", tools.mutFlipBit, indpb=0.05)
         self.toolbox.register("select", tools.selTournament, tournsize=3)
 
-    def evaluate(self, individual: Tuple) -> Tuple[float]:
+    def evaluate(self, individual: List[int]) -> Tuple[float]:
         timetable = Timetable()
-        selected_classes = [self.classes[i] for i in individual]
         score = 0
 
-        # Try to schedule each selected class
-        for class_obj in selected_classes:
-            # Skip if not a preferred course
-            if class_obj.course not in self.user_preferences["courses"]:
-                continue
+        # Track which sections we've selected for each course and activity type
+        selected_sections = defaultdict(lambda: defaultdict(list))
+        for idx, selected in enumerate(individual):
+            if selected:
+                course, activity, section_classes = self.section_info[idx]
+                selected_sections[course][activity].append(section_classes)
 
-            # Skip if not a preferred day
-            if class_obj.days not in self.user_preferences["preferred_days"]:
-                continue
+        # Validate and score each selected section
+        for course in self.user_preferences["courses"]:
+            # Ensure we have exactly one lecture and one tutorial (if available)
+            lectures = selected_sections[course]["Lecture"]
+            tutorials = selected_sections[course]["Tutorial"]
 
-            # Check if time matches user preferences
-            preferred_start = self.user_preferences["preferred_start"]
-            preferred_end = self.user_preferences["preferred_end"]
-            if not (preferred_start <= class_obj.start_time <= preferred_end):
-                continue
-
-            sc = ScheduledClass(
-                class_obj=class_obj,
-                day=class_obj.days,
-                start_time=class_obj.start_time,
-                end_time=class_obj.end_time,
+            has_lecture = (
+                len(lectures) > 0 and "Lecture" in self.course_sections[course]
+            )
+            has_tutorial = (
+                len(tutorials) > 0 and "Tutorial" in self.course_sections[course]
             )
 
-            if timetable.add_class(sc):
-                score += 10  # Base score for scheduling
+            # Penalize if missing required sections
+            if "Lecture" in self.course_sections[course] and not has_lecture:
+                score -= 1000
+            if "Tutorial" in self.course_sections[course] and not has_tutorial:
+                score -= 1000
 
-                # Bonus for preferred time
-                if preferred_start <= class_obj.start_time <= preferred_end:
-                    score += 5
-            else:
-                score -= 5  # Penalty for not scheduling
+            # Penalize if we have more than one of any type
+            if len(lectures) > 1 or len(tutorials) > 1:
+                score -= 1000
 
-        # Check course requirements
-        course_counts = defaultdict(lambda: defaultdict(int))
-        for sc in timetable.scheduled_classes:
-            course_counts[sc.class_obj.course][sc.class_obj.activity] += 1
+            # Try to add each valid section
+            for activity in ["Lecture", "Tutorial"]:
+                for section_classes in selected_sections[course][activity]:
+                    # Check if section matches preferences
+                    matches_prefs = all(
+                        cls.days in self.user_preferences["preferred_days"]
+                        and self.user_preferences["preferred_start"]
+                        <= cls.start_time
+                        <= self.user_preferences["preferred_end"]
+                        for cls in section_classes
+                    )
 
-        # Reward for meeting requirements
-        for course in self.user_preferences["courses"]:
-            if course in self.course_requirements:
-                for activity, count in self.course_requirements[course].items():
-                    if course_counts[course][activity] >= count:
-                        score += 20
+                    if timetable.add_section(section_classes):
+                        score += 10 * len(section_classes)  # Base score
+                        if matches_prefs:
+                            score += 5 * len(section_classes)  # Preference bonus
                     else:
-                        score -= 10
+                        score -= 5 * len(section_classes)  # Penalty for conflict
+
+        # Additional reward for having both lecture and tutorial for each course
+        for course in self.user_preferences["courses"]:
+            has_lecture = any(
+                s.startswith("Lecture") for s in timetable.scheduled_sections[course]
+            )
+            has_tutorial = any(
+                s.startswith("Tutorial") for s in timetable.scheduled_sections[course]
+            )
+
+            if has_lecture and has_tutorial:
+                score += 20
+            elif has_lecture or has_tutorial:
+                score += 10
 
         # Reward for preferred days
-        utilized_days = timetable.get_utilized_days()
         preferred_days_count = len(
             [
-                day
-                for day in timetable.schedule
-                if day in self.user_preferences["preferred_days"]
-                and timetable.schedule[day]
+                d
+                for d in self.user_preferences["preferred_days"]
+                if any(sc.day == d for sc in timetable.scheduled_classes)
             ]
         )
-        score += preferred_days_count * 5
+        score += preferred_days_count * 3
 
-        return (max(score, 0.1),)
+        return (max(score, 1),)  # Ensure minimum score of 1
 
     def run(self, generations=100) -> Timetable:
-        pop = self.toolbox.population(n=50)
+        pop = self.toolbox.population(n=200)  # Larger population for better exploration
         hof = tools.HallOfFame(1)
         stats = tools.Statistics(lambda ind: ind.fitness.values)
         stats.register("avg", np.mean)
@@ -280,27 +304,27 @@ class TimetableGenerator:
 
         # Build the best timetable
         best_ind = hof[0]
-        timetable = Timetable()
-        for class_idx in best_ind:
-            class_obj = self.classes[class_idx]
-            # Only add if it matches preferences
-            if (
-                class_obj.course in self.user_preferences["courses"]
-                and class_obj.days in self.user_preferences["preferred_days"]
-                and self.user_preferences["preferred_start"]
-                <= class_obj.start_time
-                <= self.user_preferences["preferred_end"]
-            ):
+        best_timetable = Timetable()
 
-                sc = ScheduledClass(
-                    class_obj=class_obj,
-                    day=class_obj.days,
-                    start_time=class_obj.start_time,
-                    end_time=class_obj.end_time,
-                )
-                timetable.add_class(sc)
+        # First pass: Add required sections (one lecture and one tutorial per course)
+        for course in self.user_preferences["courses"]:
+            # Add one lecture section if available
+            if "Lecture" in self.course_sections[course]:
+                for idx, (c, a, _) in enumerate(self.section_info):
+                    if c == course and a == "Lecture" and best_ind[idx]:
+                        section_classes = self.section_info[idx][2]
+                        best_timetable.add_section(section_classes)
+                        break
 
-        return timetable
+            # Add one tutorial section if available
+            if "Tutorial" in self.course_sections[course]:
+                for idx, (c, a, _) in enumerate(self.section_info):
+                    if c == course and a == "Tutorial" and best_ind[idx]:
+                        section_classes = self.section_info[idx][2]
+                        best_timetable.add_section(section_classes)
+                        break
+
+        return best_timetable
 
 
 def get_user_preferences(classes: List[Class]) -> dict:
@@ -372,30 +396,36 @@ def print_timetable(timetable: Timetable):
             print("No classes")
             continue
 
-        for sc in sorted(timetable.schedule[day], key=lambda x: x.start_time):
-            print(
-                f"{sc.start_time.strftime('%H:%M')}-{sc.end_time.strftime('%H:%M')}: "
-                f"{sc.class_obj.course} {sc.class_obj.activity} ({sc.class_obj.code}) "
-                f"at {sc.class_obj.venue} with {sc.class_obj.lecturer}"
-            )
+        # Group by course and section for better display
+        day_classes = defaultdict(list)
+        for sc in timetable.schedule[day]:
+            key = f"{sc.class_obj.course} - {sc.class_obj.activity} {sc.class_obj.section}"
+            day_classes[key].append(sc)
+
+        for section, classes in sorted(day_classes.items()):
+            classes_sorted = sorted(classes, key=lambda x: x.start_time)
+            print(f"\n{section}:")
+            for sc in classes_sorted:
+                print(
+                    f"  {sc.start_time.strftime('%H:%M')}-{sc.end_time.strftime('%H:%M')} "
+                    f"at {sc.class_obj.venue} with {sc.class_obj.lecturer}"
+                )
 
 
-def print_requirements_check(timetable: Timetable, course_requirements: dict):
-    """Verify all requirements are met"""
-    print("\n=== Requirements Check ===")
-    course_counts = defaultdict(lambda: defaultdict(int))
+def print_section_summary(timetable: Timetable):
+    """Show which sections were selected"""
+    print("\n=== Selected Sections ===")
+    sections_by_course = defaultdict(lambda: defaultdict(list))
     for sc in timetable.scheduled_classes:
-        course_counts[sc.class_obj.course][sc.class_obj.activity] += 1
+        sections_by_course[sc.class_obj.course][sc.class_obj.activity].append(
+            sc.class_obj.section
+        )
 
-    for course, reqs in course_requirements.items():
-        if course not in {sc.class_obj.course for sc in timetable.scheduled_classes}:
-            continue
-
+    for course, activities in sections_by_course.items():
         print(f"\n{course}:")
-        for activity, count in reqs.items():
-            actual = course_counts[course][activity]
-            status = "✓" if actual >= count else f"✗ (needs {count - actual} more)"
-            print(f"  {activity}: {actual}/{count} {status}")
+        for activity, sections in activities.items():
+            unique_sections = sorted(set(sections))
+            print(f"  {activity}: {', '.join(unique_sections)}")
 
 
 def main():
@@ -411,17 +441,25 @@ def main():
     print("\nGenerating timetable based on your preferences...")
     generator = TimetableGenerator(classes, user_prefs)
     best_timetable = generator.run(
-        generations=50
-    )  # Reduced generations for faster testing
+        generations=100
+    )  # Increased generations for better results
 
     print_timetable(best_timetable)
-    print_requirements_check(best_timetable, generator.course_requirements)
+    print_section_summary(best_timetable)
 
     # Statistics
     print("\n=== Schedule Statistics ===")
     print(f"Days used: {best_timetable.get_utilized_days()} of {len(DAYS)}")
+
+    preferred_days_used = len(
+        [
+            d
+            for d in user_prefs["preferred_days"]
+            if any(sc.day == d for sc in best_timetable.scheduled_classes)
+        ]
+    )
     print(
-        f"Preferred days used: {len([d for d in user_prefs['preferred_days'] if best_timetable.schedule[d]])}"
+        f"Preferred days used: {preferred_days_used} of {len(user_prefs['preferred_days'])}"
     )
 
 
