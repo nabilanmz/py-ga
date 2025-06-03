@@ -1,5 +1,6 @@
+import csv
 from dataclasses import dataclass
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Set
 from collections import defaultdict
 import random
 import numpy as np
@@ -13,134 +14,96 @@ creator.create("Individual", list, fitness=creator.FitnessMax)
 # Constants
 TIME_STEP = 30  # 30-minute intervals
 IDEAL_GAP = 90  # 1.5 hour ideal gap between classes (minutes)
+DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
 
 
 @dataclass
 class Class:
-    id: str
-    subject: str
-    class_type: str  # "Lecture" or "Tutorial"
+    code: str
+    course: str
+    activity: str  # "Lecture" or "Tutorial"
+    section: str
+    days: str
+    start_time: time
+    end_time: time
+    venue: str
     lecturer: str
-    duration: int  # minutes
-    possible_times: List[Dict[str, List[time]]]
+
+    @property
+    def duration(self) -> int:
+        """Calculate duration in minutes"""
+        start = datetime.combine(datetime.today(), self.start_time)
+        end = datetime.combine(datetime.today(), self.end_time)
+        return int((end - start).total_seconds() / 60)
+
+    @property
+    def unique_id(self) -> str:
+        """Unique identifier for this class instance"""
+        return f"{self.code}-{self.section}-{self.days}-{self.start_time}"
 
 
-# Predefined days and time slots
-DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri"]
-START_TIME = time(8, 0)  # 8 AM
-END_TIME = time(17, 0)  # 5 PM
+def load_classes_from_csv(filename: str) -> List[Class]:
+    """Load classes from CSV file"""
+    classes = []
+    with open(filename, mode="r", encoding="utf-8") as file:
+        reader = csv.DictReader(file)
+        for row in reader:
+            try:
+                # Parse time (handle both "HH:MM AM/PM" and "HH:MM" formats)
+                start_time = (
+                    datetime.strptime(row["Start Time"], "%I:%M %p").time()
+                    if "AM" in row["Start Time"] or "PM" in row["Start Time"]
+                    else datetime.strptime(row["Start Time"], "%H:%M").time()
+                )
+                end_time = (
+                    datetime.strptime(row["End Time"], "%I:%M %p").time()
+                    if "AM" in row["End Time"] or "PM" in row["End Time"]
+                    else datetime.strptime(row["End Time"], "%H:%M").time()
+                )
+
+                classes.append(
+                    Class(
+                        code=row["Code"],
+                        course=row["Course"],
+                        activity=row["Activity"],
+                        section=row["Section"],
+                        days=row["Days"],
+                        start_time=start_time,
+                        end_time=end_time,
+                        venue=row["Venue"],
+                        lecturer=row["Lecturer"] if row["Lecturer"] else "Not Assigned",
+                    )
+                )
+            except ValueError as e:
+                print(f"Skipping row due to error: {e}")
+                continue
+    return classes
 
 
-# Generate all possible time slots
-def generate_time_slots():
-    slots = []
-    current = datetime.combine(datetime.today(), START_TIME)
-    end = datetime.combine(datetime.today(), END_TIME)
-    while current <= end:
-        slots.append(current.time())
-        current += timedelta(minutes=TIME_STEP)
-    return slots
+def get_course_requirements(classes: List[Class]) -> Dict[str, Dict[str, int]]:
+    """Generate course requirements based on available classes"""
+    requirements = defaultdict(lambda: defaultdict(int))
+    for cls in classes:
+        requirements[cls.course][cls.activity] += 1
+
+    # Convert to regular dict and set minimum requirements
+    return {
+        course: {
+            "Lecture": min(1, counts.get("Lecture", 0)),  # At least 1 lecture section
+            "Tutorial": min(
+                1, counts.get("Tutorial", 0)
+            ),  # At least 1 tutorial section
+        }
+        for course, counts in requirements.items()
+    }
 
 
-TIME_SLOTS = generate_time_slots()
-
-# Predefined classes (unchanged from your original)
-CLASSES = [
-    # Math Classes
-    Class(
-        "M101",
-        "Math",
-        "Lecture",
-        "Dr. Smith",
-        90,
-        [{"Mon": [time(9, 0), time(13, 0)]}, {"Tue": [time(10, 0), time(14, 0)]}],
-    ),
-    Class(
-        "M102",
-        "Math",
-        "Tutorial",
-        "Prof. Johnson",
-        60,
-        [{"Mon": [time(11, 0), time(15, 0)]}, {"Wed": [time(10, 0), time(14, 0)]}],
-    ),
-    # Physics Classes
-    Class(
-        "P101",
-        "Physics",
-        "Lecture",
-        "Dr. Brown",
-        120,
-        [{"Tue": [time(9, 0), time(13, 0)]}, {"Thu": [time(10, 0), time(14, 0)]}],
-    ),
-    # Chemistry Classes
-    Class(
-        "C101",
-        "Chemistry",
-        "Lecture",
-        "Prof. Davis",
-        90,
-        [{"Wed": [time(9, 0), time(13, 0)]}, {"Fri": [time(10, 0), time(14, 0)]}],
-    ),
-    Class(
-        "C102",
-        "Chemistry",
-        "Tutorial",
-        "Dr. Wilson",
-        60,
-        [{"Thu": [time(11, 0), time(15, 0)]}, {"Fri": [time(9, 0), time(13, 0)]}],
-    ),
-    # Biology Classes
-    Class(
-        "B101",
-        "Biology",
-        "Tutorial",
-        "Dr. Taylor",
-        90,
-        [{"Mon": [time(10, 0), time(14, 0)]}, {"Wed": [time(11, 0), time(15, 0)]}],
-    ),
-    Class(
-        "B102",
-        "Biology",
-        "Tutorial",
-        "Dr. Taylor",
-        90,
-        [{"Tue": [time(9, 0), time(13, 0)]}, {"Thu": [time(10, 0), time(14, 0)]}],
-    ),
-    # Computer Science Classes
-    Class(
-        "CS101",
-        "Computer Science",
-        "Lecture",
-        "Prof. Miller",
-        90,
-        [{"Mon": [time(9, 0), time(13, 0)]}, {"Wed": [time(10, 0), time(14, 0)]}],
-    ),
-    Class(
-        "CS102",
-        "Computer Science",
-        "Lecture",
-        "Dr. Anderson",
-        90,
-        [{"Tue": [time(11, 0), time(15, 0)]}, {"Thu": [time(9, 0), time(13, 0)]}],
-    ),
-    Class(
-        "CS103",
-        "Computer Science",
-        "Tutorial",
-        "Dr. Anderson",
-        60,
-        [{"Fri": [time(10, 0), time(14, 0)]}],
-    ),
-]
-
-# Subject requirements
-SUBJECT_REQUIREMENTS = {
-    "Math": {"Lecture": 1, "Tutorial": 1},
-    "Physics": {"Lecture": 1},
-    "Chemistry": {"Lecture": 1, "Tutorial": 1},
-    "Biology": {"Tutorial": 2},
-    "Computer Science": {"Lecture": 2, "Tutorial": 1},
-}
+def group_classes_by_section(classes: List[Class]) -> Dict[str, Dict[str, List[Class]]]:
+    """Group classes by course and section"""
+    section_groups = defaultdict(lambda: defaultdict(list))
+    for cls in classes:
+        section_groups[cls.course][f"{cls.activity}_{cls.section}"].append(cls)
+    return section_groups
 
 
 @dataclass
@@ -155,8 +118,11 @@ class Timetable:
     def __init__(self):
         self.schedule = {day: [] for day in DAYS}
         self.scheduled_classes = []
+        # Track which sections have been scheduled for each course
+        self.scheduled_sections = defaultdict(set)
 
     def add_class(self, scheduled_class: ScheduledClass) -> bool:
+        class_obj = scheduled_class.class_obj
         day = scheduled_class.day
         start = scheduled_class.start_time
         end = scheduled_class.end_time
@@ -166,15 +132,69 @@ class Timetable:
             if not (end <= existing.start_time or start >= existing.end_time):
                 return False
 
-        # Check lecturer availability
-        lecturer = scheduled_class.class_obj.lecturer
-        for existing in self.scheduled_classes:
-            if existing.class_obj.lecturer == lecturer:
-                if not (end <= existing.start_time or start >= existing.end_time):
-                    return False
+        # Check lecturer availability (skip if lecturer not assigned)
+        lecturer = class_obj.lecturer
+        if lecturer != "Not Assigned":
+            for existing in self.scheduled_classes:
+                if existing.class_obj.lecturer == lecturer:
+                    if not (end <= existing.start_time or start >= existing.end_time):
+                        return False
 
+        # If all checks passed, add the class
         self.schedule[day].append(scheduled_class)
         self.scheduled_classes.append(scheduled_class)
+        return True
+
+    def add_section(self, section_classes: List[Class]) -> bool:
+        """Add all classes in a section (must add all or none)"""
+        # First check if we can add all classes
+        temp_schedule = {day: list(classes) for day, classes in self.schedule.items()}
+        temp_scheduled_classes = list(self.scheduled_classes)
+
+        for cls in section_classes:
+            sc = ScheduledClass(
+                class_obj=cls,
+                day=cls.days,
+                start_time=cls.start_time,
+                end_time=cls.end_time,
+            )
+
+            # Check for overlapping classes
+            for existing in temp_schedule[cls.days]:
+                if not (
+                    sc.end_time <= existing.start_time
+                    or sc.start_time >= existing.end_time
+                ):
+                    return False
+
+            # Check lecturer availability
+            if cls.lecturer != "Not Assigned":
+                for existing in temp_scheduled_classes:
+                    if existing.class_obj.lecturer == cls.lecturer:
+                        if not (
+                            sc.end_time <= existing.start_time
+                            or sc.start_time >= existing.end_time
+                        ):
+                            return False
+
+            temp_schedule[cls.days].append(sc)
+            temp_scheduled_classes.append(sc)
+
+        # If we get here, all classes can be added
+        for cls in section_classes:
+            sc = ScheduledClass(
+                class_obj=cls,
+                day=cls.days,
+                start_time=cls.start_time,
+                end_time=cls.end_time,
+            )
+            self.add_class(sc)
+
+        # Mark this section as scheduled
+        first_class = section_classes[0]
+        self.scheduled_sections[first_class.course].add(
+            f"{first_class.activity}_{first_class.section}"
+        )
         return True
 
     def get_utilized_days(self) -> int:
@@ -183,7 +203,7 @@ class Timetable:
     def get_class_gaps(self) -> Dict[str, List[float]]:
         subject_times = defaultdict(list)
         for sc in self.scheduled_classes:
-            subject_times[sc.class_obj.subject].append(
+            subject_times[sc.class_obj.course].append(
                 (sc.day, datetime.combine(datetime.today(), sc.start_time))
             )
 
@@ -191,96 +211,104 @@ class Timetable:
         for subject, times in subject_times.items():
             times.sort(key=lambda x: x[1])
             for i in range(1, len(times)):
-                if times[i][0] == times[i - 1][0]:
+                if times[i][0] == times[i - 1][0]:  # Same day
                     gap = (times[i][1] - times[i - 1][1]).total_seconds() / 60
                     gaps[subject].append(gap)
         return gaps
 
 
 class TimetableGenerator:
-    def __init__(self, user_preferences):
+    def __init__(self, classes: List[Class], user_preferences: dict):
+        self.classes = classes
         self.user_preferences = user_preferences
-        self.valid_classes = [
-            i
-            for i, c in enumerate(CLASSES)
-            if c.subject in user_preferences["subjects"]
-        ]
+        self.course_requirements = get_course_requirements(classes)
+        self.section_groups = group_classes_by_section(classes)
         self.setup_deap()
 
     def setup_deap(self):
         self.toolbox = base.Toolbox()
-        self.toolbox.register("attr_bool", lambda: random.choice(self.valid_classes))
+
+        # Create a list of all section groups for preferred courses
+        self.valid_sections = []
+        self.section_index_map = {}
+        index = 0
+
+        for course in self.user_preferences["courses"]:
+            if course in self.section_groups:
+                for section_key, section_classes in self.section_groups[course].items():
+                    self.valid_sections.append((course, section_key, section_classes))
+                    self.section_index_map[(course, section_key)] = index
+                    index += 1
+
+        self.toolbox.register(
+            "attr_bool", random.randint, 0, len(self.valid_sections) - 1
+        )
         self.toolbox.register(
             "individual",
             tools.initRepeat,
             creator.Individual,
             self.toolbox.attr_bool,
-            n=len(CLASSES),
+            n=len(self.valid_sections),
         )
         self.toolbox.register(
             "population", tools.initRepeat, list, self.toolbox.individual
         )
+
         self.toolbox.register("evaluate", self.evaluate)
         self.toolbox.register("mate", tools.cxTwoPoint)
         self.toolbox.register(
             "mutate",
             tools.mutUniformInt,
-            low=min(self.valid_classes),
-            up=max(self.valid_classes),
+            low=0,
+            up=len(self.valid_sections) - 1,
             indpb=0.1,
         )
         self.toolbox.register("select", tools.selTournament, tournsize=3)
 
     def evaluate(self, individual: Tuple) -> Tuple[float]:
         timetable = Timetable()
-        selected_classes = [
-            CLASSES[i] for i in individual if i in self.valid_classes
-        ]  # Only preferred subjects
         score = 0
 
-        # Try to schedule each selected class
-        for class_obj in selected_classes:
-            scheduled = False
-            for time_option in class_obj.possible_times:
-                for day, start_times in time_option.items():
-                    if day not in self.user_preferences["preferred_days"]:
-                        continue
-                    for start_time in start_times:
-                        # Check if time matches user preferences
-                        preferred_start = self.user_preferences["preferred_start"]
-                        preferred_end = self.user_preferences["preferred_end"]
-                        if not (preferred_start <= start_time <= preferred_end):
-                            continue
+        # Track which sections we're trying to schedule
+        selected_sections = set()
+        for section_idx in individual:
+            course, section_key, section_classes = self.valid_sections[section_idx]
+            selected_sections.add((course, section_key))
 
-                        end_time = (
-                            datetime.combine(datetime.today(), start_time)
-                            + timedelta(minutes=class_obj.duration)
-                        ).time()
-                        sc = ScheduledClass(class_obj, day, start_time, end_time)
-                        if timetable.add_class(sc):
-                            scheduled = True
-                            score += 10  # Base score for scheduling
-                            # Bonus for preferred time
-                            if preferred_start <= start_time <= preferred_end:
-                                score += 5
-                            break
-                    if scheduled:
-                        break
-                if scheduled:
-                    break
+        # Try to schedule each selected section
+        for course, section_key in selected_sections:
+            _, _, section_classes = self.valid_sections[
+                self.section_index_map[(course, section_key)]
+            ]
 
-            if not scheduled:
-                score -= 5  # Penalty for not scheduling
+            # Check if this section matches preferred days/times
+            matches_prefs = all(
+                cls.days in self.user_preferences["preferred_days"]
+                and self.user_preferences["preferred_start"]
+                <= cls.start_time
+                <= self.user_preferences["preferred_end"]
+                for cls in section_classes
+            )
 
-        # Check subject requirements for preferred subjects only
-        subject_counts = defaultdict(lambda: defaultdict(int))
+            if timetable.add_section(section_classes):
+                score += 10 * len(section_classes)  # Base score for scheduling
+
+                # Bonus for preferred time
+                if matches_prefs:
+                    score += 5 * len(section_classes)
+            else:
+                score -= 5 * len(section_classes)  # Penalty for not scheduling
+
+        # Check course requirements
+        course_activities = defaultdict(set)
         for sc in timetable.scheduled_classes:
-            subject_counts[sc.class_obj.subject][sc.class_obj.class_type] += 1
+            course_activities[sc.class_obj.course].add(sc.class_obj.activity)
 
-        for subject in self.user_preferences["subjects"]:
-            if subject in SUBJECT_REQUIREMENTS:
-                for class_type, count in SUBJECT_REQUIREMENTS[subject].items():
-                    if subject_counts[subject][class_type] >= count:
+        # Reward for meeting requirements
+        for course in self.user_preferences["courses"]:
+            if course in self.course_requirements:
+                for activity, count in self.course_requirements[course].items():
+                    if activity in course_activities[course]:
                         score += 20
                     else:
                         score -= 10
@@ -317,88 +345,154 @@ class TimetableGenerator:
             verbose=True,
         )
 
-        # Build timetable from best individual
+        # Build the best timetable
         best_ind = hof[0]
         timetable = Timetable()
-        for class_idx in best_ind:
-            if class_idx not in self.valid_classes:
-                continue
-            class_obj = CLASSES[class_idx]
-            scheduled = False
-            for time_option in class_obj.possible_times:
-                for day, start_times in time_option.items():
-                    for start_time in start_times:
-                        end_time = (
-                            datetime.combine(datetime.today(), start_time)
-                            + timedelta(minutes=class_obj.duration)
-                        ).time()
-                        sc = ScheduledClass(class_obj, day, start_time, end_time)
-                        if timetable.add_class(sc):
-                            scheduled = True
-                            break
-                    if scheduled:
-                        break
-                if scheduled:
-                    break
+        selected_sections = set()
+
+        # First collect all selected sections
+        for section_idx in best_ind:
+            course, section_key, _ = self.valid_sections[section_idx]
+            selected_sections.add((course, section_key))
+
+        # Try to add sections in a way that maximizes the score
+        for course, section_key in selected_sections:
+            _, _, section_classes = self.valid_sections[
+                self.section_index_map[(course, section_key)]
+            ]
+            timetable.add_section(section_classes)
+
         return timetable
 
 
-def get_user_preferences():
-    print("Available subjects:", list(SUBJECT_REQUIREMENTS.keys()))
+def get_user_preferences(classes: List[Class]) -> dict:
+    """Get user preferences with validation"""
+    # Get unique courses
+    courses = sorted({cls.course for cls in classes})
+    print("\nAvailable Courses:")
+    for i, course in enumerate(courses, 1):
+        print(f"{i}. {course}")
+
     while True:
-        subjects = (
-            input("Enter preferred subjects (comma separated): ").strip().split(",")
-        )
-        subjects = [s.strip() for s in subjects]
-        # Validate subjects
-        invalid = [s for s in subjects if s not in SUBJECT_REQUIREMENTS]
-        if not invalid:
+        try:
+            selections = (
+                input("\nEnter preferred course numbers (comma separated): ")
+                .strip()
+                .split(",")
+            )
+            selected_courses = [
+                courses[int(sel) - 1] for sel in selections if sel.strip()
+            ]
+            if not selected_courses:
+                print("Please select at least one course")
+                continue
             break
-        print(
-            f"Invalid subjects: {invalid}. Please choose from {list(SUBJECT_REQUIREMENTS.keys())}"
+        except (ValueError, IndexError):
+            print("Invalid selection. Please enter numbers from the list.")
+
+    print("\nAvailable Days:", DAYS)
+    while True:
+        preferred_days = (
+            input("Enter preferred days (comma separated): ").strip().split(",")
         )
+        preferred_days = [day.strip().capitalize() for day in preferred_days]
+        # Validate days
+        invalid_days = [day for day in preferred_days if day not in DAYS]
+        if invalid_days:
+            print(f"Invalid days: {invalid_days}. Please choose from {DAYS}")
+        else:
+            break
 
-    print("\nAvailable days:", DAYS)
-    preferred_days = (
-        input("Enter preferred days (comma separated): ").strip().split(",")
-    )
-    preferred_days = [d.strip() for d in preferred_days]
-
-    print("\nPreferred time range (HH:MM format)")
-    start = input("Earliest preferred start time (e.g., 09:00): ").strip()
-    end = input("Latest preferred end time (e.g., 16:00): ").strip()
+    print("\nPreferred time range (24-hour format)")
+    while True:
+        try:
+            start = input("Earliest preferred start time (e.g., 09:00): ").strip()
+            end = input("Latest preferred end time (e.g., 16:00): ").strip()
+            preferred_start = datetime.strptime(start, "%H:%M").time()
+            preferred_end = datetime.strptime(end, "%H:%M").time()
+            if preferred_start >= preferred_end:
+                print("End time must be after start time")
+                continue
+            break
+        except ValueError:
+            print("Invalid time format. Please use HH:MM (24-hour format)")
 
     return {
-        "subjects": subjects,
+        "courses": selected_courses,
         "preferred_days": preferred_days,
-        "preferred_start": time(*map(int, start.split(":"))),
-        "preferred_end": time(*map(int, end.split(":"))),
+        "preferred_start": preferred_start,
+        "preferred_end": preferred_end,
     }
 
 
 def print_timetable(timetable: Timetable):
+    """Print the timetable in readable format"""
     print("\n=== Optimized Timetable ===")
     for day in DAYS:
         print(f"\n{day}:")
         if not timetable.schedule[day]:
             print("No classes")
             continue
+
         for sc in sorted(timetable.schedule[day], key=lambda x: x.start_time):
             print(
                 f"{sc.start_time.strftime('%H:%M')}-{sc.end_time.strftime('%H:%M')}: "
-                f"{sc.class_obj.subject} {sc.class_obj.class_type} with {sc.class_obj.lecturer}"
+                f"{sc.class_obj.course} {sc.class_obj.activity} (Section {sc.class_obj.section}) "
+                f"at {sc.class_obj.venue} with {sc.class_obj.lecturer}"
             )
+
+
+def print_requirements_check(timetable: Timetable, course_requirements: dict):
+    """Verify all requirements are met"""
+    print("\n=== Requirements Check ===")
+    course_activities = defaultdict(set)
+    for sc in timetable.scheduled_classes:
+        course_activities[sc.class_obj.course].add(sc.class_obj.activity)
+
+    for course, reqs in course_requirements.items():
+        if course not in course_activities:
+            continue
+
+        print(f"\n{course}:")
+        for activity, count in reqs.items():
+            status = "✓" if activity in course_activities[course] else f"✗ (missing)"
+            print(f"  {activity}: {status}")
+
+
+def print_section_enrollment(timetable: Timetable):
+    """Show which sections are enrolled"""
+    print("\n=== Section Enrollment ===")
+    enrolled_sections = defaultdict(set)
+    for sc in timetable.scheduled_classes:
+        enrolled_sections[sc.class_obj.course].add(
+            f"{sc.class_obj.activity} {sc.class_obj.section}"
+        )
+
+    for course, sections in enrolled_sections.items():
+        print(f"\n{course}:")
+        for section in sorted(sections):
+            print(f"  - {section}")
 
 
 def main():
     print("=== University Timetable Generator ===")
-    user_prefs = get_user_preferences()
+
+    # Load classes from CSV
+    classes = load_classes_from_csv("classes.csv")
+    print(f"Loaded {len(classes)} classes from CSV")
+
+    # Get user preferences
+    user_prefs = get_user_preferences(classes)
 
     print("\nGenerating timetable based on your preferences...")
-    generator = TimetableGenerator(user_prefs)
-    best_timetable = generator.run()
+    generator = TimetableGenerator(classes, user_prefs)
+    best_timetable = generator.run(
+        generations=50
+    )  # Reduced generations for faster testing
 
     print_timetable(best_timetable)
+    print_requirements_check(best_timetable, generator.course_requirements)
+    print_section_enrollment(best_timetable)
 
     # Statistics
     print("\n=== Schedule Statistics ===")
