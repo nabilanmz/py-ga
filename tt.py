@@ -12,8 +12,6 @@ creator.create("FitnessMax", base.Fitness, weights=(1.0,))
 creator.create("Individual", list, fitness=creator.FitnessMax)
 
 # Constants
-TIME_STEP = 30  # 30-minute intervals
-IDEAL_GAP = 90  # 1.5 hour ideal gap between classes (minutes)
 DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
 
 
@@ -95,9 +93,7 @@ class Timetable:
     def __init__(self):
         self.schedule = {day: [] for day in DAYS}
         self.scheduled_classes = []
-        self.scheduled_sections = defaultdict(
-            set
-        )  # Track scheduled sections per course
+        self.scheduled_sections = defaultdict(set)  # course: set of section keys
 
     def can_add_section(self, section_classes: List[Class]) -> bool:
         """Check if we can add all classes in this section"""
@@ -168,24 +164,16 @@ class TimetableGenerator:
     def setup_deap(self):
         self.toolbox = base.Toolbox()
 
-        # For each course, create lists of available lecture and tutorial sections
-        self.course_sections = defaultdict(lambda: defaultdict(list))
-        for course in self.user_preferences["courses"]:
-            if course in self.section_groups:
-                for section_key, section_classes in self.section_groups[course].items():
-                    activity = section_classes[0].activity
-                    self.course_sections[course][activity].append(section_classes)
-
         # Create a list of all possible section choices
         self.section_choices = []
         self.section_info = []  # Stores (course, activity, section_classes)
 
         for course in self.user_preferences["courses"]:
-            for activity in ["Lecture", "Tutorial"]:
-                if activity in self.course_sections[course]:
-                    for section_classes in self.course_sections[course][activity]:
-                        self.section_choices.append((course, activity, section_classes))
-                        self.section_info.append((course, activity, section_classes))
+            if course in self.section_groups:
+                for section_key, section_classes in self.section_groups[course].items():
+                    activity = section_classes[0].activity
+                    self.section_choices.append((course, activity, section_classes))
+                    self.section_info.append((course, activity, section_classes))
 
         # Each gene represents whether to include a section (0 or 1)
         self.toolbox.register("attr_bool", random.randint, 0, 1)
@@ -218,26 +206,24 @@ class TimetableGenerator:
 
         # Validate and score each selected section
         for course in self.user_preferences["courses"]:
-            # Ensure we have exactly one lecture and one tutorial (if available)
+            # Check we have exactly one lecture and one tutorial (if available)
             lectures = selected_sections[course]["Lecture"]
             tutorials = selected_sections[course]["Tutorial"]
 
-            has_lecture = (
-                len(lectures) > 0 and "Lecture" in self.course_sections[course]
-            )
-            has_tutorial = (
-                len(tutorials) > 0 and "Tutorial" in self.course_sections[course]
-            )
+            has_lecture = len(lectures) > 0 and "Lecture" in [
+                s[1] for s in self.section_info if s[0] == course
+            ]
+            has_tutorial = len(tutorials) > 0 and "Tutorial" in [
+                s[1] for s in self.section_info if s[0] == course
+            ]
 
-            # Penalize if missing required sections
-            if "Lecture" in self.course_sections[course] and not has_lecture:
-                score -= 1000
-            if "Tutorial" in self.course_sections[course] and not has_tutorial:
-                score -= 1000
-
-            # Penalize if we have more than one of any type
-            if len(lectures) > 1 or len(tutorials) > 1:
-                score -= 1000
+            # Penalize if not exactly one of each type
+            if "Lecture" in [s[1] for s in self.section_info if s[0] == course]:
+                if len(lectures) != 1:
+                    score -= 1000  # Heavy penalty for wrong number of lecture sections
+            if "Tutorial" in [s[1] for s in self.section_info if s[0] == course]:
+                if len(tutorials) != 1:
+                    score -= 1000  # Heavy penalty for wrong number of tutorial sections
 
             # Try to add each valid section
             for activity in ["Lecture", "Tutorial"]:
@@ -284,8 +270,8 @@ class TimetableGenerator:
 
         return (max(score, 1),)  # Ensure minimum score of 1
 
-    def run(self, generations=100) -> Timetable:
-        pop = self.toolbox.population(n=200)  # Larger population for better exploration
+    def run(self, generations=200) -> Timetable:
+        pop = self.toolbox.population(n=300)  # Larger population for better exploration
         hof = tools.HallOfFame(1)
         stats = tools.Statistics(lambda ind: ind.fitness.values)
         stats.register("avg", np.mean)
@@ -306,22 +292,32 @@ class TimetableGenerator:
         best_ind = hof[0]
         best_timetable = Timetable()
 
-        # First pass: Add required sections (one lecture and one tutorial per course)
+        # First add required sections (one lecture and one tutorial per course)
         for course in self.user_preferences["courses"]:
+            # Find selected lecture sections
+            lecture_sections = []
+            for idx, (c, a, sc) in enumerate(self.section_info):
+                if c == course and a == "Lecture" and best_ind[idx]:
+                    lecture_sections.append(sc)
+
             # Add one lecture section if available
-            if "Lecture" in self.course_sections[course]:
-                for idx, (c, a, _) in enumerate(self.section_info):
-                    if c == course and a == "Lecture" and best_ind[idx]:
-                        section_classes = self.section_info[idx][2]
-                        best_timetable.add_section(section_classes)
+            if lecture_sections:
+                # Try to add the first one that fits
+                for section in lecture_sections:
+                    if best_timetable.add_section(section):
                         break
 
+            # Find selected tutorial sections
+            tutorial_sections = []
+            for idx, (c, a, sc) in enumerate(self.section_info):
+                if c == course and a == "Tutorial" and best_ind[idx]:
+                    tutorial_sections.append(sc)
+
             # Add one tutorial section if available
-            if "Tutorial" in self.course_sections[course]:
-                for idx, (c, a, _) in enumerate(self.section_info):
-                    if c == course and a == "Tutorial" and best_ind[idx]:
-                        section_classes = self.section_info[idx][2]
-                        best_timetable.add_section(section_classes)
+            if tutorial_sections:
+                # Try to add the first one that fits
+                for section in tutorial_sections:
+                    if best_timetable.add_section(section):
                         break
 
         return best_timetable
@@ -441,7 +437,7 @@ def main():
     print("\nGenerating timetable based on your preferences...")
     generator = TimetableGenerator(classes, user_prefs)
     best_timetable = generator.run(
-        generations=100
+        generations=200
     )  # Increased generations for better results
 
     print_timetable(best_timetable)
