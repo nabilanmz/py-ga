@@ -288,8 +288,9 @@ class TimetableGenerator:
         self.toolbox.register("select", tools.selTournament, tournsize=3)
 
     def evaluate(self, individual: List[int]) -> Tuple[float,]:
-        # ### CHANGED ###: This function is now much simpler and more robust.
+        # ### THIS IS THE METHOD TO REPLACE ###
         timetable = Timetable()
+        MAX_CONSECUTIVE_CLASSES = 2  # You can adjust this preference
 
         # Step 1: Check for HARD constraints (clashes). If any fail, fitness is 0.
         for i, choice_index in enumerate(individual):
@@ -302,7 +303,7 @@ class TimetableGenerator:
             # No clash, so add it to our temporary timetable for further checks
             timetable.add_section(chosen_section)
 
-        # Step 2: If we reach here, the timetable is valid (no clashes, all requirements met).
+        # Step 2: If we reach here, the timetable is valid.
         # Now, score it based on SOFT constraints (preferences).
         score = 10000.0  # High base score for being a valid solution
 
@@ -310,11 +311,12 @@ class TimetableGenerator:
         days_used = timetable.get_utilized_days()
         score -= days_used * 500
 
-        # Score for gaps (using your existing logic)
+        # Score for gaps (using your existing logic, it's still good for rewarding breaks)
         total_gap_score = 0
         utilized_days = [day for day in DAYS if timetable.schedule[day]]
         if utilized_days:
             for day in utilized_days:
+                # We use the existing gap score function here
                 total_gap_score += timetable.get_day_gaps_score(day)
             score += (total_gap_score / len(utilized_days)) * 1000
 
@@ -331,6 +333,39 @@ class TimetableGenerator:
                 <= self.user_preferences["preferred_end"]
             ):
                 score += 50
+
+        # ### NEW & IMPROVED: Step 3 - Apply a heavy penalty for too many consecutive classes ###
+        for day in DAYS:
+            day_classes = timetable.schedule[day]
+            if len(day_classes) <= MAX_CONSECUTIVE_CLASSES:
+                continue  # No penalty needed if the total classes for the day is within the limit
+
+            consecutive_streak = 1
+            for i in range(1, len(day_classes)):
+                prev_class_end = day_classes[i - 1].end_time
+                curr_class_start = day_classes[i].start_time
+
+                # Check if classes are back-to-back (allowing for a small, e.g., 15-min, travel gap)
+                prev_end_dt = datetime.combine(datetime.today(), prev_class_end)
+                curr_start_dt = datetime.combine(datetime.today(), curr_class_start)
+
+                if (curr_start_dt - prev_end_dt) <= timedelta(minutes=15):
+                    consecutive_streak += 1
+                else:
+                    # The streak is broken, check if the previous streak was too long
+                    if consecutive_streak > MAX_CONSECUTIVE_CLASSES:
+                        # Apply penalty for each class over the limit
+                        over_limit = consecutive_streak - MAX_CONSECUTIVE_CLASSES
+                        # The penalty should be significant enough to matter
+                        penalty = over_limit * 750  # Heavy penalty per extra class
+                        score -= penalty
+                    consecutive_streak = 1  # Reset streak
+
+            # Final check for the last streak of the day
+            if consecutive_streak > MAX_CONSECUTIVE_CLASSES:
+                over_limit = consecutive_streak - MAX_CONSECUTIVE_CLASSES
+                penalty = over_limit * 750
+                score -= penalty
 
         return (score,)
 
