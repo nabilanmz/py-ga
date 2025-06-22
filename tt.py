@@ -28,6 +28,7 @@ class Class:
     start_time: time
     end_time: time
     venue: str
+    tied_to: List[str]  # ### NEW ###
     lecturer: str
 
     @property
@@ -48,13 +49,13 @@ class Class:
 
 
 def load_classes_from_csv(filename: str) -> List[Class]:
-    """Load classes from CSV file"""
+    """Load classes from CSV file, including the new 'Tied To' column."""
     classes = []
     with open(filename, mode="r", encoding="utf-8") as file:
         reader = csv.DictReader(file)
         for row in reader:
             try:
-                # Parse time (handle both "HH:MM AM/PM" and "HH:MM" formats)
+                # (Your existing time parsing logic is good, keep it)
                 start_time = (
                     datetime.strptime(row["Start Time"], "%I:%M %p").time()
                     if "AM" in row["Start Time"] or "PM" in row["Start Time"]
@@ -66,6 +67,10 @@ def load_classes_from_csv(filename: str) -> List[Class]:
                     else datetime.strptime(row["End Time"], "%H:%M").time()
                 )
 
+                # ### NEW ###: Parse the 'Tied To' column
+                tied_to_str = row.get("Tied To", "")
+                tied_to_list = [s.strip() for s in tied_to_str.split(",") if s.strip()]
+
                 classes.append(
                     Class(
                         code=row["Code"],
@@ -76,11 +81,12 @@ def load_classes_from_csv(filename: str) -> List[Class]:
                         start_time=start_time,
                         end_time=end_time,
                         venue=row["Venue"],
+                        tied_to=tied_to_list,  # ### NEW ###
                         lecturer=row["Lecturer"] if row["Lecturer"] else "Not Assigned",
                     )
                 )
-            except ValueError as e:
-                print(f"Skipping row due to error: {e}")
+            except (ValueError, KeyError) as e:
+                print(f"Skipping row due to error: {e} in row {row}")
                 continue
     return classes
 
@@ -221,48 +227,118 @@ class Timetable:
         return True
 
 
+### REWRITTEN CLASS ###
 class TimetableGenerator:
     def __init__(self, classes: List[Class], user_preferences: dict):
         self.classes = classes
         self.user_preferences = user_preferences
+        self.enforce_ties = self.user_preferences.get(
+            "enforce_ties", True
+        )  # Default to True
         self.section_groups = group_classes_by_section(classes)
-        self.gene_map = []  # ### NEW ###: This will map genes to actual sections
+        self.gene_map = []
         self.setup_deap()
 
     def setup_deap(self):
+        """Sets up DEAP based on whether ties are enforced."""
         self.toolbox = base.Toolbox()
-
-        # ### NEW ###: Create a map of genes to choices
-        # Each gene in the individual will correspond to an entry in this map.
         gene_upper_bounds = []
 
-        for course in self.user_preferences["courses"]:
-            if course in self.section_groups:
-                # Get all lecture sections for this course
+        if self.enforce_ties:
+            print("\nSetting up GA with ENFORCED lecture-tutorial ties.")
+            # Gene map for tied sections: (course, [ (lecture_section, [tied_tutorial_1, ...]), ... ])
+            for course in self.user_preferences["courses"]:
+                if course not in self.section_groups:
+                    continue
+
+                course_lectures = sorted(
+                    [
+                        sc
+                        for sk, sc in self.section_groups[course].items()
+                        if sk.startswith("Lecture")
+                    ],
+                    key=lambda s: s[0].section,
+                )
+
+                if not course_lectures:
+                    continue
+
+                lecture_tutorial_pairs = []
+                max_tied_tutorials = 0
+                for lect_section_group in course_lectures:
+                    # Find all tutorial sections tied to this lecture
+                    tied_tutorial_names = lect_section_group[0].tied_to
+
+                    tied_tutorials = []
+                    for tut_name in tied_tutorial_names:
+                        tut_key = f"Tutorial_{tut_name}"
+                        if tut_key in self.section_groups[course]:
+                            tied_tutorials.append(self.section_groups[course][tut_key])
+
+                    if tied_tutorials:
+                        lecture_tutorial_pairs.append(
+                            (lect_section_group, tied_tutorials)
+                        )
+                        if len(tied_tutorials) > max_tied_tutorials:
+                            max_tied_tutorials = len(tied_tutorials)
+
+                if lecture_tutorial_pairs:
+                    self.gene_map.append(
+                        {
+                            "type": "tied_course",
+                            "course": course,
+                            "pairs": lecture_tutorial_pairs,
+                        }
+                    )
+                    # Gene 1: choice of lecture. Gene 2: choice of tutorial from the tied list.
+                    gene_upper_bounds.append(len(lecture_tutorial_pairs) - 1)
+                    gene_upper_bounds.append(
+                        max_tied_tutorials - 1 if max_tied_tutorials > 0 else 0
+                    )
+
+        else:  # Ties are NOT enforced (lecturer view)
+            print("\nSetting up GA with INDEPENDENT lecture and tutorial choices.")
+            for course in self.user_preferences["courses"]:
+                if course not in self.section_groups:
+                    continue
+
                 lectures = [
                     sc
                     for sk, sc in self.section_groups[course].items()
                     if sk.startswith("Lecture")
                 ]
-                if lectures:
-                    self.gene_map.append(("Lecture", course, lectures))
-                    gene_upper_bounds.append(len(lectures) - 1)
-
-                # Get all tutorial sections for this course
                 tutorials = [
                     sc
                     for sk, sc in self.section_groups[course].items()
                     if sk.startswith("Tutorial")
                 ]
+
+                if lectures:
+                    self.gene_map.append(
+                        {
+                            "type": "independent_activity",
+                            "activity": "Lecture",
+                            "course": course,
+                            "sections": lectures,
+                        }
+                    )
+                    gene_upper_bounds.append(len(lectures) - 1)
                 if tutorials:
-                    self.gene_map.append(("Tutorial", course, tutorials))
+                    self.gene_map.append(
+                        {
+                            "type": "independent_activity",
+                            "activity": "Tutorial",
+                            "course": course,
+                            "sections": tutorials,
+                        }
+                    )
                     gene_upper_bounds.append(len(tutorials) - 1)
 
         if not self.gene_map:
-            raise ValueError("No valid sections found for the selected courses.")
+            raise ValueError(
+                "No valid sections found for the selected courses with the chosen constraints."
+            )
 
-        # ### CHANGED ###: An individual is a list of integers (choices)
-        # Each gene is an integer from 0 to the number of available sections for that slot.
         self.toolbox.register(
             "indices",
             lambda bounds: [random.randint(0, b) for b in bounds],
@@ -277,7 +353,6 @@ class TimetableGenerator:
 
         self.toolbox.register("evaluate", self.evaluate)
         self.toolbox.register("mate", tools.cxUniform, indpb=0.5)
-        # Mutation for integer-based individuals
         self.toolbox.register(
             "mutate",
             tools.mutUniformInt,
@@ -288,45 +363,62 @@ class TimetableGenerator:
         self.toolbox.register("select", tools.selTournament, tournsize=3)
 
     def evaluate(self, individual: List[int]) -> Tuple[float,]:
-        # ### THIS IS THE METHOD TO REPLACE ###
         timetable = Timetable()
-        MAX_CONSECUTIVE_CLASSES = 2  # You can adjust this preference
 
-        # Step 1: Check for HARD constraints (clashes). If any fail, fitness is 0.
-        for i, choice_index in enumerate(individual):
-            activity, course, sections = self.gene_map[i]
-            chosen_section = sections[choice_index]
+        # --- Decode the individual into a list of sections to schedule ---
+        sections_to_schedule = []
+        if self.enforce_ties:
+            gene_idx = 0
+            for map_item in self.gene_map:
+                # Individual contains [lecture_choice, tutorial_choice, lecture_choice_2, tutorial_choice_2, ...]
+                lecture_choice = individual[gene_idx]
+                tutorial_choice = individual[gene_idx + 1]
 
-            if not timetable.can_add_section(chosen_section):
-                return (0,)  # Clash detected. This is an invalid timetable.
+                # Get the chosen lecture
+                chosen_pair = map_item["pairs"][lecture_choice]
+                lecture_section = chosen_pair[0]
+                sections_to_schedule.append(lecture_section)
 
-            # No clash, so add it to our temporary timetable for further checks
-            timetable.add_section(chosen_section)
+                # Get the chosen tutorial using the modulo trick for safety
+                tied_tutorials = chosen_pair[1]
+                if tied_tutorials:
+                    safe_tutorial_choice = tutorial_choice % len(tied_tutorials)
+                    tutorial_section = tied_tutorials[safe_tutorial_choice]
+                    sections_to_schedule.append(tutorial_section)
 
-        # Step 2: If we reach here, the timetable is valid.
-        # Now, score it based on SOFT constraints (preferences).
-        score = 10000.0  # High base score for being a valid solution
+                gene_idx += 2
+        else:  # Not enforcing ties
+            for i, map_item in enumerate(self.gene_map):
+                choice = individual[i]
+                sections_to_schedule.append(map_item["sections"][choice])
+
+        # --- Check for clashes (HARD constraint) ---
+        for section in sections_to_schedule:
+            if not timetable.can_add_section(section):
+                return (0,)  # Invalid timetable due to clash
+            timetable.add_section(section)
+
+        # --- If valid, score based on preferences (SOFT constraints) ---
+        # This scoring logic is the same as our previous best version.
+        score = 10000.0
+        MAX_CONSECUTIVE_CLASSES = 2
 
         # Penalty for using more days
         days_used = timetable.get_utilized_days()
         score -= days_used * 500
 
-        # Score for gaps (using your existing logic, it's still good for rewarding breaks)
+        # Score for gaps
         total_gap_score = 0
         utilized_days = [day for day in DAYS if timetable.schedule[day]]
         if utilized_days:
             for day in utilized_days:
-                # We use the existing gap score function here
                 total_gap_score += timetable.get_day_gaps_score(day)
             score += (total_gap_score / len(utilized_days)) * 1000
 
-        # Bonus for using preferred days
+        # Bonuses for preferences
         for sc in timetable.scheduled_classes:
             if sc.day in self.user_preferences["preferred_days"]:
                 score += 100
-
-        # Bonus for classes within preferred time range
-        for sc in timetable.scheduled_classes:
             if (
                 self.user_preferences["preferred_start"]
                 <= sc.start_time
@@ -334,43 +426,41 @@ class TimetableGenerator:
             ):
                 score += 50
 
-        # ### NEW & IMPROVED: Step 3 - Apply a heavy penalty for too many consecutive classes ###
+        # Heavy penalty for too many consecutive classes
         for day in DAYS:
             day_classes = timetable.schedule[day]
             if len(day_classes) <= MAX_CONSECUTIVE_CLASSES:
-                continue  # No penalty needed if the total classes for the day is within the limit
+                continue
 
             consecutive_streak = 1
             for i in range(1, len(day_classes)):
-                prev_class_end = day_classes[i - 1].end_time
-                curr_class_start = day_classes[i].start_time
-
-                # Check if classes are back-to-back (allowing for a small, e.g., 15-min, travel gap)
-                prev_end_dt = datetime.combine(datetime.today(), prev_class_end)
-                curr_start_dt = datetime.combine(datetime.today(), curr_class_start)
+                prev_end_dt = datetime.combine(
+                    datetime.today(), day_classes[i - 1].end_time
+                )
+                curr_start_dt = datetime.combine(
+                    datetime.today(), day_classes[i].start_time
+                )
 
                 if (curr_start_dt - prev_end_dt) <= timedelta(minutes=15):
                     consecutive_streak += 1
                 else:
-                    # The streak is broken, check if the previous streak was too long
                     if consecutive_streak > MAX_CONSECUTIVE_CLASSES:
-                        # Apply penalty for each class over the limit
                         over_limit = consecutive_streak - MAX_CONSECUTIVE_CLASSES
-                        # The penalty should be significant enough to matter
-                        penalty = over_limit * 750  # Heavy penalty per extra class
-                        score -= penalty
-                    consecutive_streak = 1  # Reset streak
+                        score -= over_limit * 750
+                    consecutive_streak = 1
 
-            # Final check for the last streak of the day
             if consecutive_streak > MAX_CONSECUTIVE_CLASSES:
                 over_limit = consecutive_streak - MAX_CONSECUTIVE_CLASSES
-                penalty = over_limit * 750
-                score -= penalty
+                score -= over_limit * 750
 
         return (score,)
 
-    def run(self, generations=100, pop_size=300) -> Optional[Timetable]:
-        # ### CHANGED ###: Logic to handle cases where no solution is found.
+    # The run() method can stay the same as the previous version. It correctly
+    # handles finding the best individual from the Hall of Fame and building
+    # the final timetable. You will only need to adjust its decoding logic
+    # when building the final timetable.
+
+    def run(self, generations=150, pop_size=500) -> Optional[Timetable]:
         if not self.gene_map:
             print(
                 "\nError: No sections available for the selected courses. Cannot generate a timetable."
@@ -397,21 +487,42 @@ class TimetableGenerator:
 
         if not hof or hof[0].fitness.values[0] == 0:
             print("\n" + "=" * 50)
-            print("COULD NOT FIND A VALID TIMETABLE")
+            print("COULD NOT FIND A VALID, CLASH-FREE TIMETABLE")
             print(
-                "This likely means there are unavoidable time clashes between the required sections of your chosen courses."
+                "This likely means there are unavoidable time clashes between the required sections of your chosen courses, even with all possible combinations."
             )
             print("Please try a different combination of courses.")
             print("=" * 50)
             return None
 
-        # Build the best timetable. This is now guaranteed to be valid.
+        # Build the best timetable from the best individual
         best_ind = hof[0]
         best_timetable = Timetable()
-        for i, choice_index in enumerate(best_ind):
-            activity, course, sections = self.gene_map[i]
-            chosen_section = sections[choice_index]
-            best_timetable.add_section(chosen_section)
+
+        # --- Decode the BEST individual to build the final timetable ---
+        # This logic mirrors the decoding in evaluate()
+        sections_to_schedule = []
+        if self.enforce_ties:
+            gene_idx = 0
+            for map_item in self.gene_map:
+                lecture_choice = best_ind[gene_idx]
+                tutorial_choice = best_ind[gene_idx + 1]
+                chosen_pair = map_item["pairs"][lecture_choice]
+                lecture_section = chosen_pair[0]
+                sections_to_schedule.append(lecture_section)
+                tied_tutorials = chosen_pair[1]
+                if tied_tutorials:
+                    safe_tutorial_choice = tutorial_choice % len(tied_tutorials)
+                    tutorial_section = tied_tutorials[safe_tutorial_choice]
+                    sections_to_schedule.append(tutorial_section)
+                gene_idx += 2
+        else:  # Not enforcing ties
+            for i, map_item in enumerate(self.gene_map):
+                choice = best_ind[i]
+                sections_to_schedule.append(map_item["sections"][choice])
+
+        for section in sections_to_schedule:
+            best_timetable.add_section(section)
 
         return best_timetable
 
@@ -468,12 +579,28 @@ def get_user_preferences(classes: List[Class]) -> dict:
         except ValueError:
             print("Invalid time format. Please use HH:MM (24-hour format)")
 
-    return {
-        "courses": selected_courses,
-        "preferred_days": preferred_days,
-        "preferred_start": preferred_start,
-        "preferred_end": preferred_end,
+    # ### NEW ###: Ask whether to enforce the ties
+    while True:
+        enforce_str = (
+            input("\nEnforce lecture/tutorial ties? (yes/no): ").strip().lower()
+        )
+        if enforce_str in ["yes", "y"]:
+            enforce_ties = True
+            break
+        elif enforce_str in ["no", "n"]:
+            enforce_ties = False
+            break
+        else:
+            print("Invalid input. Please enter 'yes' or 'no'.")
+
+    existing_prefs = {
+        "courses": selected_courses,  # This is from your existing code
+        "preferred_days": preferred_days,  # This is from your existing code
+        "preferred_start": preferred_start,  # This is from your existing code
+        "preferred_end": preferred_end,  # This is from your existing code
     }
+    existing_prefs["enforce_ties"] = enforce_ties
+    return existing_prefs
 
 
 def print_timetable(timetable: Timetable):
