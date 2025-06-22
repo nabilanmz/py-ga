@@ -102,50 +102,28 @@ class ScheduledClass:
 
 
 class Timetable:
-    def __init__(self, section_groups=None):
+    def __init__(self):
         self.schedule = {day: [] for day in DAYS}
         self.scheduled_classes = []
-        self.scheduled_sections = defaultdict(set)  # course: set of section keys
-        self.section_groups = section_groups if section_groups else {}
 
     def can_add_section(self, section_classes: List[Class]) -> bool:
-        """Check if we can add all classes in this section"""
-        first_class = section_classes[0]
-        activity_type = first_class.activity
-
-        # Check if we already have a section of this type for the course
-        for scheduled_section in self.scheduled_sections[first_class.course]:
-            if scheduled_section.startswith(activity_type):
-                return False  # Already have a section of this type
-
-        # Check time and lecturer conflicts
+        """Check if we can add all classes in this section without clashes."""
+        # This function now only needs to check for time clashes, as the GA
+        # structure handles the one-lecture-per-course logic.
         for cls in section_classes:
             # Check time conflicts
             for existing in self.schedule[cls.days]:
-                if not (
-                    cls.end_time <= existing.start_time
-                    or cls.start_time >= existing.end_time
+                # A clash occurs if the new class starts before the existing one ends
+                # AND the new class ends after the existing one starts.
+                if (
+                    cls.start_time < existing.end_time
+                    and cls.end_time > existing.start_time
                 ):
                     return False
-
-            # Check lecturer conflicts (if lecturer is assigned)
-            if cls.lecturer != "Not Assigned":
-                for existing in self.scheduled_classes:
-                    if existing.class_obj.lecturer == cls.lecturer:
-                        if not (
-                            cls.end_time <= existing.start_time
-                            or cls.start_time >= existing.end_time
-                        ):
-                            return False
-
         return True
 
-    def add_section(self, section_classes: List[Class]) -> bool:
-        """Add all classes in a section"""
-        if not self.can_add_section(section_classes):
-            return False
-
-        # Add all classes in the section
+    def add_section(self, section_classes: List[Class]):
+        """Add all classes in a section. Assumes can_add_section was checked."""
         for cls in section_classes:
             sc = ScheduledClass(
                 class_obj=cls,
@@ -154,14 +132,12 @@ class Timetable:
                 end_time=cls.end_time,
             )
             self.schedule[cls.days].append(sc)
+            # Sort the day's schedule by start time after adding
+            self.schedule[cls.days].sort(key=lambda x: x.start_time)
             self.scheduled_classes.append(sc)
 
-        # Record that we've scheduled this section
-        first_class = section_classes[0]
-        self.scheduled_sections[first_class.course].add(
-            f"{first_class.activity}_{first_class.section}"
-        )
-        return True
+    # All other Timetable methods (get_utilized_days, get_consecutive_days_score, etc.)
+    # remain the same. The meets_requirements method is no longer needed.
 
     def get_utilized_days(self) -> int:
         return sum(1 for day in DAYS if self.schedule[day])
@@ -250,236 +226,157 @@ class TimetableGenerator:
         self.classes = classes
         self.user_preferences = user_preferences
         self.section_groups = group_classes_by_section(classes)
+        self.gene_map = []  # ### NEW ###: This will map genes to actual sections
         self.setup_deap()
 
     def setup_deap(self):
         self.toolbox = base.Toolbox()
 
-        # Create a list of all possible section choices
-        self.section_choices = []
-        self.section_info = []  # Stores (course, activity, section_classes)
+        # ### NEW ###: Create a map of genes to choices
+        # Each gene in the individual will correspond to an entry in this map.
+        gene_upper_bounds = []
 
         for course in self.user_preferences["courses"]:
             if course in self.section_groups:
-                for section_key, section_classes in self.section_groups[course].items():
-                    activity = section_classes[0].activity
-                    self.section_choices.append((course, activity, section_classes))
-                    self.section_info.append((course, activity, section_classes))
+                # Get all lecture sections for this course
+                lectures = [
+                    sc
+                    for sk, sc in self.section_groups[course].items()
+                    if sk.startswith("Lecture")
+                ]
+                if lectures:
+                    self.gene_map.append(("Lecture", course, lectures))
+                    gene_upper_bounds.append(len(lectures) - 1)
 
-        # Each gene represents whether to include a section (0 or 1)
-        self.toolbox.register("attr_bool", random.randint, 0, 1)
+                # Get all tutorial sections for this course
+                tutorials = [
+                    sc
+                    for sk, sc in self.section_groups[course].items()
+                    if sk.startswith("Tutorial")
+                ]
+                if tutorials:
+                    self.gene_map.append(("Tutorial", course, tutorials))
+                    gene_upper_bounds.append(len(tutorials) - 1)
+
+        if not self.gene_map:
+            raise ValueError("No valid sections found for the selected courses.")
+
+        # ### CHANGED ###: An individual is a list of integers (choices)
+        # Each gene is an integer from 0 to the number of available sections for that slot.
         self.toolbox.register(
-            "individual",
-            tools.initRepeat,
-            creator.Individual,
-            self.toolbox.attr_bool,
-            n=len(self.section_choices),
+            "indices",
+            lambda bounds: [random.randint(0, b) for b in bounds],
+            gene_upper_bounds,
+        )
+        self.toolbox.register(
+            "individual", tools.initIterate, creator.Individual, self.toolbox.indices
         )
         self.toolbox.register(
             "population", tools.initRepeat, list, self.toolbox.individual
         )
 
         self.toolbox.register("evaluate", self.evaluate)
-        self.toolbox.register("mate", tools.cxTwoPoint)
-        self.toolbox.register("mutate", tools.mutFlipBit, indpb=0.05)
+        self.toolbox.register("mate", tools.cxUniform, indpb=0.5)
+        # Mutation for integer-based individuals
+        self.toolbox.register(
+            "mutate",
+            tools.mutUniformInt,
+            low=[0] * len(gene_upper_bounds),
+            up=gene_upper_bounds,
+            indpb=0.1,
+        )
         self.toolbox.register("select", tools.selTournament, tournsize=3)
 
-    def evaluate(self, individual: List[int]) -> Tuple[float]:
-        timetable = Timetable(self.section_groups)
-        score = 0
+    def evaluate(self, individual: List[int]) -> Tuple[float,]:
+        # ### CHANGED ###: This function is now much simpler and more robust.
+        timetable = Timetable()
 
-        # Track which sections we've selected for each course and activity type
-        selected_sections = defaultdict(lambda: defaultdict(list))
-        for idx, selected in enumerate(individual):
-            if selected:
-                course, activity, section_classes = self.section_info[idx]
-                selected_sections[course][activity].append(section_classes)
+        # Step 1: Check for HARD constraints (clashes). If any fail, fitness is 0.
+        for i, choice_index in enumerate(individual):
+            activity, course, sections = self.gene_map[i]
+            chosen_section = sections[choice_index]
 
-        # Validate and score each selected section
-        for course in self.user_preferences["courses"]:
-            # Check we have exactly one lecture and one tutorial (if available)
-            lectures = selected_sections[course]["Lecture"]
-            tutorials = selected_sections[course]["Tutorial"]
+            if not timetable.can_add_section(chosen_section):
+                return (0,)  # Clash detected. This is an invalid timetable.
 
-            # Check if course has lecture sections available
-            has_lecture_available = any(
-                s[1] == "Lecture" for s in self.section_info if s[0] == course
+            # No clash, so add it to our temporary timetable for further checks
+            timetable.add_section(chosen_section)
+
+        # Step 2: If we reach here, the timetable is valid (no clashes, all requirements met).
+        # Now, score it based on SOFT constraints (preferences).
+        score = 10000.0  # High base score for being a valid solution
+
+        # Penalty for using more days
+        days_used = timetable.get_utilized_days()
+        score -= days_used * 500
+
+        # Score for gaps (using your existing logic)
+        total_gap_score = 0
+        utilized_days = [day for day in DAYS if timetable.schedule[day]]
+        if utilized_days:
+            for day in utilized_days:
+                total_gap_score += timetable.get_day_gaps_score(day)
+            score += (total_gap_score / len(utilized_days)) * 1000
+
+        # Bonus for using preferred days
+        for sc in timetable.scheduled_classes:
+            if sc.day in self.user_preferences["preferred_days"]:
+                score += 100
+
+        # Bonus for classes within preferred time range
+        for sc in timetable.scheduled_classes:
+            if (
+                self.user_preferences["preferred_start"]
+                <= sc.start_time
+                <= self.user_preferences["preferred_end"]
+            ):
+                score += 50
+
+        return (score,)
+
+    def run(self, generations=100, pop_size=300) -> Optional[Timetable]:
+        # ### CHANGED ###: Logic to handle cases where no solution is found.
+        if not self.gene_map:
+            print(
+                "\nError: No sections available for the selected courses. Cannot generate a timetable."
             )
-            # Check if course has tutorial sections available
-            has_tutorial_available = any(
-                s[1] == "Tutorial" for s in self.section_info if s[0] == course
-            )
+            return None
 
-            # Penalize if not exactly one lecture (when available)
-            if has_lecture_available:
-                if len(lectures) != 1:
-                    score -= 100000  # Extremely heavy penalty for wrong number of lecture sections
-            # Penalize if not exactly one tutorial (when available)
-            if has_tutorial_available:
-                if len(tutorials) != 1:
-                    score -= 100000  # Extremely heavy penalty for wrong number of tutorial sections
-
-            # Try to add each valid section
-            for activity in ["Lecture", "Tutorial"]:
-                for section_classes in selected_sections[course][activity]:
-                    # Check if section matches preferences
-                    matches_prefs = all(
-                        cls.days in self.user_preferences["preferred_days"]
-                        and self.user_preferences["preferred_start"]
-                        <= cls.start_time
-                        <= self.user_preferences["preferred_end"]
-                        for cls in section_classes
-                    )
-
-                    if timetable.add_section(section_classes):
-                        score += 1000 * len(section_classes)  # High base score
-                        if matches_prefs:
-                            score += 500 * len(section_classes)  # High preference bonus
-                    else:
-                        score -= 500 * len(section_classes)  # High penalty for conflict
-
-        # Additional scoring based on timetable quality
-        if timetable.meets_requirements(self.user_preferences["courses"]):
-            # Reward for fewer days used
-            days_used = timetable.get_utilized_days()
-            score += (len(DAYS) - days_used) * 1500  # More reward for fewer days
-
-            # Reward for consecutive days
-            score += timetable.get_consecutive_days_score() * 1000
-
-            # Reward for good gaps between classes
-            gap_score = sum(
-                timetable.get_day_gaps_score(day)
-                for day in DAYS
-                if timetable.schedule[day]
-            )
-            if days_used > 0:
-                gap_score /= days_used
-            score += gap_score * 500
-
-            # Reward for preferred days
-            preferred_days_count = len(
-                [
-                    d
-                    for d in self.user_preferences["preferred_days"]
-                    if any(sc.day == d for sc in timetable.scheduled_classes)
-                ]
-            )
-            score += preferred_days_count * 300
-
-            # Reward for earlier start times (to help consolidate into fewer days)
-            avg_start_time = (
-                sum(
-                    datetime.combine(datetime.today(), sc.start_time).timestamp()
-                    for sc in timetable.scheduled_classes
-                )
-                / len(timetable.scheduled_classes)
-                if timetable.scheduled_classes
-                else 0
-            )
-            score += (86400 - avg_start_time) / 3600 * 100  # Reward earlier start times
-        else:
-            # Extremely heavy penalty for missing requirements
-            score -= 1000000
-
-        return (max(score, 1),)
-
-    def run(self, generations=500) -> Timetable:
-        pop = self.toolbox.population(n=1000)
+        pop = self.toolbox.population(n=pop_size)
         hof = tools.HallOfFame(1)
-        stats = tools.Statistics(lambda ind: ind.fitness.values)
+        stats = tools.Statistics(lambda ind: ind.fitness.values[0])
         stats.register("avg", np.mean)
         stats.register("max", np.max)
+        stats.register("min", np.min)
 
-        # Run the genetic algorithm
         algorithms.eaSimple(
             pop,
             self.toolbox,
             cxpb=0.8,
-            mutpb=0.1,
+            mutpb=0.2,
             ngen=generations,
             stats=stats,
             halloffame=hof,
             verbose=True,
         )
 
-        # Build the best timetable
-        best_ind = hof[0]
-        best_timetable = Timetable(self.section_groups)
-
-        # First add required sections (one lecture and one tutorial per course)
-        for course in self.user_preferences["courses"]:
-            # Find selected lecture sections
-            lecture_sections = []
-            for idx, (c, a, sc) in enumerate(self.section_info):
-                if c == course and a == "Lecture" and best_ind[idx]:
-                    lecture_sections.append(sc)
-
-            # Add exactly one lecture section if available
-            if lecture_sections:
-                # Sort by preference match and earlier times
-                lecture_sections.sort(
-                    key=lambda sc: (
-                        all(
-                            cls.days in self.user_preferences["preferred_days"]
-                            and self.user_preferences["preferred_start"]
-                            <= cls.start_time
-                            <= self.user_preferences["preferred_end"]
-                            for cls in sc
-                        ),
-                        sc[0].start_time,  # Earlier times first
-                    ),
-                    reverse=True,
-                )
-
-                # Try all possible lecture sections until one fits
-                for section in lecture_sections:
-                    if best_timetable.add_section(section):
-                        break
-                else:
-                    print(
-                        f"\nWarning: Could not schedule any lecture section for {course}"
-                    )
-
-            # Find selected tutorial sections
-            tutorial_sections = []
-            for idx, (c, a, sc) in enumerate(self.section_info):
-                if c == course and a == "Tutorial" and best_ind[idx]:
-                    tutorial_sections.append(sc)
-
-            # Add exactly one tutorial section if available
-            if tutorial_sections:
-                # Sort by preference match and earlier times
-                tutorial_sections.sort(
-                    key=lambda sc: (
-                        all(
-                            cls.days in self.user_preferences["preferred_days"]
-                            and self.user_preferences["preferred_start"]
-                            <= cls.start_time
-                            <= self.user_preferences["preferred_end"]
-                            for cls in sc
-                        ),
-                        sc[0].start_time,  # Earlier times first
-                    ),
-                    reverse=True,
-                )
-
-                # Try all possible tutorial sections until one fits
-                for section in tutorial_sections:
-                    if best_timetable.add_section(section):
-                        break
-                else:
-                    print(
-                        f"\nWarning: Could not schedule any tutorial section for {course}"
-                    )
-
-        # Final check to ensure all requirements are met
-        if not best_timetable.meets_requirements(self.user_preferences["courses"]):
+        if not hof or hof[0].fitness.values[0] == 0:
+            print("\n" + "=" * 50)
+            print("COULD NOT FIND A VALID TIMETABLE")
             print(
-                "\nWarning: Could not find a valid schedule meeting all requirements!"
+                "This likely means there are unavoidable time clashes between the required sections of your chosen courses."
             )
-            print("This may be due to conflicting class times or unavailable sections.")
-            print("Please try adjusting your preferences or course selection.")
+            print("Please try a different combination of courses.")
+            print("=" * 50)
+            return None
+
+        # Build the best timetable. This is now guaranteed to be valid.
+        best_ind = hof[0]
+        best_timetable = Timetable()
+        for i, choice_index in enumerate(best_ind):
+            activity, course, sections = self.gene_map[i]
+            chosen_section = sections[choice_index]
+            best_timetable.add_section(chosen_section)
 
         return best_timetable
 
@@ -604,77 +501,92 @@ def print_missing_courses(
 
 def main():
     print("=== University Timetable Generator ===")
-
-    # Load classes from CSV
     classes = load_classes_from_csv("classes.csv")
-    print(f"Loaded {len(classes)} classes from CSV")
-    section_groups = group_classes_by_section(classes)
+    if not classes:
+        print("Could not load any classes from classes.csv. Exiting.")
+        return
 
-    # Get user preferences
+    print(f"Loaded {len(classes)} classes from CSV")
+
     user_prefs = get_user_preferences(classes)
 
     print("\nGenerating timetable based on your preferences...")
-    generator = TimetableGenerator(classes, user_prefs)
-    best_timetable = generator.run(generations=500)
+    try:
+        generator = TimetableGenerator(classes, user_prefs)
+        best_timetable = generator.run(generations=150, pop_size=500)
 
-    print_timetable(best_timetable)
-    print_section_summary(best_timetable)
-    print_missing_courses(best_timetable, user_prefs["courses"], section_groups)
+        # ### CHANGED ###: Handle the case where no timetable is returned
+        if best_timetable:
+            print_timetable(best_timetable)
+            print_section_summary(best_timetable)
 
-    # Statistics
-    print("\n=== Schedule Statistics ===")
-    days_used = best_timetable.get_utilized_days()
-    print(f"Days used: {days_used} of {len(DAYS)}")
+            print("\n=== Schedule Statistics ===")
+            days_used = best_timetable.get_utilized_days()
+            print(f"Days used: {days_used} of {len(DAYS)}")
+            preferred_days_used = len(
+                [
+                    d
+                    for d in user_prefs["preferred_days"]
+                    if any(sc.day == d for sc in best_timetable.scheduled_classes)
+                ]
+            )
+            print(
+                f"Preferred days used: {preferred_days_used} of {len(user_prefs['preferred_days'])}"
+            )
 
-    preferred_days_used = len(
-        [
-            d
-            for d in user_prefs["preferred_days"]
-            if any(sc.day == d for sc in best_timetable.scheduled_classes)
-        ]
-    )
-    print(
-        f"Preferred days used: {preferred_days_used} of {len(user_prefs['preferred_days'])}"
-    )
+            # Calculate average gap between classes
+            total_gap = timedelta()
+            gap_count = 0
+            for day in DAYS:
+                day_classes = sorted(
+                    best_timetable.schedule[day], key=lambda x: x.start_time
+                )
+                for i in range(1, len(day_classes)):
+                    prev_end = datetime.combine(
+                        datetime.today(), day_classes[i - 1].end_time
+                    )
+                    curr_start = datetime.combine(
+                        datetime.today(), day_classes[i].start_time
+                    )
+                    gap = curr_start - prev_end
+                    if gap > timedelta(0):  # Only count positive gaps
+                        total_gap += gap
+                        gap_count += 1
+            avg_gap = total_gap / gap_count if gap_count > 0 else timedelta(0)
+            print(f"Average gap between classes: {avg_gap}")
 
-    # Calculate average gap between classes
-    total_gap = timedelta()
-    gap_count = 0
-    for day in DAYS:
-        day_classes = sorted(best_timetable.schedule[day], key=lambda x: x.start_time)
-        for i in range(1, len(day_classes)):
-            prev_end = datetime.combine(datetime.today(), day_classes[i - 1].end_time)
-            curr_start = datetime.combine(datetime.today(), day_classes[i].start_time)
-            gap = curr_start - prev_end
-            if gap > timedelta(0):  # Only count positive gaps
-                total_gap += gap
-                gap_count += 1
-    avg_gap = total_gap / gap_count if gap_count > 0 else timedelta(0)
-    print(f"Average gap between classes: {avg_gap}")
-
-    # Check for consecutive classes
-    consecutive_counts = []
-    for day in DAYS:
-        day_classes = sorted(best_timetable.schedule[day], key=lambda x: x.start_time)
-        current_streak = 1
-        for i in range(1, len(day_classes)):
-            prev_end = datetime.combine(datetime.today(), day_classes[i - 1].end_time)
-            curr_start = datetime.combine(datetime.today(), day_classes[i].start_time)
-            if curr_start - prev_end <= timedelta(
-                minutes=15
-            ):  # Considered consecutive if gap <= 15 mins
-                current_streak += 1
-            else:
+            # Check for consecutive classes
+            consecutive_counts = []
+            for day in DAYS:
+                day_classes = sorted(
+                    best_timetable.schedule[day], key=lambda x: x.start_time
+                )
+                current_streak = 1
+                for i in range(1, len(day_classes)):
+                    prev_end = datetime.combine(
+                        datetime.today(), day_classes[i - 1].end_time
+                    )
+                    curr_start = datetime.combine(
+                        datetime.today(), day_classes[i].start_time
+                    )
+                    if curr_start - prev_end <= timedelta(
+                        minutes=15
+                    ):  # Considered consecutive if gap <= 15 mins
+                        current_streak += 1
+                    else:
+                        if current_streak > 1:
+                            consecutive_counts.append(current_streak)
+                        current_streak = 1
                 if current_streak > 1:
                     consecutive_counts.append(current_streak)
-                current_streak = 1
-        if current_streak > 1:
-            consecutive_counts.append(current_streak)
 
-    if consecutive_counts:
-        print(f"Consecutive classes: {', '.join(map(str, consecutive_counts))}")
-    else:
-        print("No consecutive classes (more than 1 in a row)")
+            if consecutive_counts:
+                print(f"Consecutive classes: {', '.join(map(str, consecutive_counts))}")
+            else:
+                print("No consecutive classes (more than 1 in a row)")
+
+    except ValueError as e:
+        print(f"\nAn error occurred: {e}")
 
 
 if __name__ == "__main__":
