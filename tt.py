@@ -366,7 +366,7 @@ class TimetableGenerator:
         # ### THIS IS THE METHOD TO REPLACE ###
         timetable = Timetable()
 
-        # --- Decode the individual into a list of sections to schedule ---
+        # --- Decode the individual (your existing logic is perfect) ---
         sections_to_schedule = []
         if self.enforce_ties:
             gene_idx = 0
@@ -382,7 +382,7 @@ class TimetableGenerator:
                     tutorial_section = tied_tutorials[safe_tutorial_choice]
                     sections_to_schedule.append(tutorial_section)
                 gene_idx += 2
-        else:  # Not enforcing ties
+        else:
             for i, map_item in enumerate(self.gene_map):
                 choice = individual[i]
                 sections_to_schedule.append(map_item["sections"][choice])
@@ -390,20 +390,31 @@ class TimetableGenerator:
         # --- Check for clashes (HARD constraint) ---
         for section in sections_to_schedule:
             if not timetable.can_add_section(section):
-                return (0,)  # Invalid timetable due to clash
+                return (0,)  # Invalid timetable
             timetable.add_section(section)
 
-        # --- If valid, score based on preferences (SOFT constraints) ---
+        # --- Score based on preferences (SOFT constraints) ---
         score = 10000.0
 
-        # --- Scoring constants (tunable knobs) ---
-        BONUS_FOR_TWO_CONSECUTIVE = 400  # Increased bonus for the ideal state
-        PENALTY_PER_EXTRA_CONSECUTIVE = 750  # The heavy penalty for streaks of 3+
-        PENALTY_FOR_ISOLATED_CLASS = 75  # Small penalty for single-class streaks
-
-        # Penalty for using more days
+        # ### NEW: Non-Linear Scoring for Days Used ###
+        # This is the most important change. The value of a day off is immense.
         days_used = timetable.get_utilized_days()
-        score -= days_used * 500
+        # A 3-day week is the baseline (0). Anything less is a huge bonus. Anything more is a penalty.
+        days_score_map = {
+            5: -1500,  # A 5-day week is highly undesirable
+            4: -750,  # A 4-day week is acceptable but not great
+            3: 0,  # A 3-day week is the standard goal
+            2: 2000,  # A 2-day week is amazing and gets a massive bonus
+            1: 3000,  # A 1-day week is the dream, gets an even bigger bonus
+        }
+        # Use .get() for safety, with a heavy penalty for unexpected values.
+        score += days_score_map.get(days_used, -4000)
+
+        # --- Scoring for Streaks and Gaps (Within-Day Comfort) ---
+        # These values are now balanced against the powerful "days used" score.
+        BONUS_FOR_TWO_CONSECUTIVE = 300  # Good, but not as good as a day off
+        PENALTY_PER_EXTRA_CONSECUTIVE = 600  # Bad, but might be worth it for a day off
+        PENALTY_FOR_ISOLATED_CLASS = 100  # Annoying, but not a deal-breaker
 
         # Score for gaps (rewards small, manageable breaks)
         total_gap_score = 0
@@ -411,27 +422,24 @@ class TimetableGenerator:
         if utilized_days:
             for day in utilized_days:
                 total_gap_score += timetable.get_day_gaps_score(day)
-            score += (total_gap_score / len(utilized_days)) * 800
+            score += (total_gap_score / len(utilized_days)) * 500  # Reduced weight
 
-        # Bonuses for preferred days/times
+        # Bonuses for preferred days/times (acts as a tie-breaker)
         for sc in timetable.scheduled_classes:
             if sc.day in self.user_preferences["preferred_days"]:
-                score += 100
+                score += 50
             if (
                 self.user_preferences["preferred_start"]
                 <= sc.start_time
                 <= self.user_preferences["preferred_end"]
             ):
-                score += 50
+                score += 25
 
-        # ### NEW: Tiered scoring for class streaks ###
-        # This replaces the previous simple penalty logic.
+        # Tiered scoring for class streaks
         for day in DAYS:
             day_classes = timetable.schedule[day]
             if not day_classes:
                 continue
-
-            # If only one class on the day, it's an isolated streak of 1
             if len(day_classes) == 1:
                 score -= PENALTY_FOR_ISOLATED_CLASS
                 continue
@@ -445,11 +453,9 @@ class TimetableGenerator:
                     datetime.today(), day_classes[i].start_time
                 )
 
-                # Check if classes are back-to-back
                 if (curr_start_dt - prev_end_dt) <= timedelta(minutes=15):
                     consecutive_streak += 1
                 else:
-                    # Streak is broken, so score the streak that just ended
                     if consecutive_streak == 1:
                         score -= PENALTY_FOR_ISOLATED_CLASS
                     elif consecutive_streak == 2:
@@ -457,10 +463,8 @@ class TimetableGenerator:
                     elif consecutive_streak > 2:
                         over_limit = consecutive_streak - 2
                         score -= over_limit * PENALTY_PER_EXTRA_CONSECUTIVE
+                    consecutive_streak = 1
 
-                    consecutive_streak = 1  # Reset for the new class
-
-            # After the loop, score the final streak of the day
             if consecutive_streak == 1:
                 score -= PENALTY_FOR_ISOLATED_CLASS
             elif consecutive_streak == 2:
@@ -469,9 +473,10 @@ class TimetableGenerator:
                 over_limit = consecutive_streak - 2
                 score -= over_limit * PENALTY_PER_EXTRA_CONSECUTIVE
 
-        return (score,)
+        return (
+            score,
+        )  # The run() method can stay the same as the previous version. It correctly
 
-    # The run() method can stay the same as the previous version. It correctly
     # handles finding the best individual from the Hall of Fame and building
     # the final timetable. You will only need to adjust its decoding logic
     # when building the final timetable.
