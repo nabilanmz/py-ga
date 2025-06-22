@@ -363,6 +363,7 @@ class TimetableGenerator:
         self.toolbox.register("select", tools.selTournament, tournsize=3)
 
     def evaluate(self, individual: List[int]) -> Tuple[float,]:
+        # ### THIS IS THE METHOD TO REPLACE ###
         timetable = Timetable()
 
         # --- Decode the individual into a list of sections to schedule ---
@@ -370,22 +371,16 @@ class TimetableGenerator:
         if self.enforce_ties:
             gene_idx = 0
             for map_item in self.gene_map:
-                # Individual contains [lecture_choice, tutorial_choice, lecture_choice_2, tutorial_choice_2, ...]
                 lecture_choice = individual[gene_idx]
                 tutorial_choice = individual[gene_idx + 1]
-
-                # Get the chosen lecture
                 chosen_pair = map_item["pairs"][lecture_choice]
                 lecture_section = chosen_pair[0]
                 sections_to_schedule.append(lecture_section)
-
-                # Get the chosen tutorial using the modulo trick for safety
                 tied_tutorials = chosen_pair[1]
                 if tied_tutorials:
                     safe_tutorial_choice = tutorial_choice % len(tied_tutorials)
                     tutorial_section = tied_tutorials[safe_tutorial_choice]
                     sections_to_schedule.append(tutorial_section)
-
                 gene_idx += 2
         else:  # Not enforcing ties
             for i, map_item in enumerate(self.gene_map):
@@ -399,23 +394,26 @@ class TimetableGenerator:
             timetable.add_section(section)
 
         # --- If valid, score based on preferences (SOFT constraints) ---
-        # This scoring logic is the same as our previous best version.
         score = 10000.0
-        MAX_CONSECUTIVE_CLASSES = 2
+
+        # --- Scoring constants (tunable knobs) ---
+        BONUS_FOR_TWO_CONSECUTIVE = 400  # Increased bonus for the ideal state
+        PENALTY_PER_EXTRA_CONSECUTIVE = 750  # The heavy penalty for streaks of 3+
+        PENALTY_FOR_ISOLATED_CLASS = 75  # Small penalty for single-class streaks
 
         # Penalty for using more days
         days_used = timetable.get_utilized_days()
         score -= days_used * 500
 
-        # Score for gaps
+        # Score for gaps (rewards small, manageable breaks)
         total_gap_score = 0
         utilized_days = [day for day in DAYS if timetable.schedule[day]]
         if utilized_days:
             for day in utilized_days:
                 total_gap_score += timetable.get_day_gaps_score(day)
-            score += (total_gap_score / len(utilized_days)) * 1000
+            score += (total_gap_score / len(utilized_days)) * 800
 
-        # Bonuses for preferences
+        # Bonuses for preferred days/times
         for sc in timetable.scheduled_classes:
             if sc.day in self.user_preferences["preferred_days"]:
                 score += 100
@@ -426,10 +424,16 @@ class TimetableGenerator:
             ):
                 score += 50
 
-        # Heavy penalty for too many consecutive classes
+        # ### NEW: Tiered scoring for class streaks ###
+        # This replaces the previous simple penalty logic.
         for day in DAYS:
             day_classes = timetable.schedule[day]
-            if len(day_classes) <= MAX_CONSECUTIVE_CLASSES:
+            if not day_classes:
+                continue
+
+            # If only one class on the day, it's an isolated streak of 1
+            if len(day_classes) == 1:
+                score -= PENALTY_FOR_ISOLATED_CLASS
                 continue
 
             consecutive_streak = 1
@@ -441,17 +445,29 @@ class TimetableGenerator:
                     datetime.today(), day_classes[i].start_time
                 )
 
+                # Check if classes are back-to-back
                 if (curr_start_dt - prev_end_dt) <= timedelta(minutes=15):
                     consecutive_streak += 1
                 else:
-                    if consecutive_streak > MAX_CONSECUTIVE_CLASSES:
-                        over_limit = consecutive_streak - MAX_CONSECUTIVE_CLASSES
-                        score -= over_limit * 750
-                    consecutive_streak = 1
+                    # Streak is broken, so score the streak that just ended
+                    if consecutive_streak == 1:
+                        score -= PENALTY_FOR_ISOLATED_CLASS
+                    elif consecutive_streak == 2:
+                        score += BONUS_FOR_TWO_CONSECUTIVE
+                    elif consecutive_streak > 2:
+                        over_limit = consecutive_streak - 2
+                        score -= over_limit * PENALTY_PER_EXTRA_CONSECUTIVE
 
-            if consecutive_streak > MAX_CONSECUTIVE_CLASSES:
-                over_limit = consecutive_streak - MAX_CONSECUTIVE_CLASSES
-                score -= over_limit * 750
+                    consecutive_streak = 1  # Reset for the new class
+
+            # After the loop, score the final streak of the day
+            if consecutive_streak == 1:
+                score -= PENALTY_FOR_ISOLATED_CLASS
+            elif consecutive_streak == 2:
+                score += BONUS_FOR_TWO_CONSECUTIVE
+            elif consecutive_streak > 2:
+                over_limit = consecutive_streak - 2
+                score -= over_limit * PENALTY_PER_EXTRA_CONSECUTIVE
 
         return (score,)
 
