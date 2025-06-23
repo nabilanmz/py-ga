@@ -362,6 +362,8 @@ class TimetableGenerator:
         )
         self.toolbox.register("select", tools.selTournament, tournsize=3)
 
+    # In tt.py, replace your existing evaluate method with this one.
+
     def evaluate(self, individual: List[int]) -> Tuple[float,]:
         # ### THIS IS THE METHOD TO REPLACE ###
         timetable = Timetable()
@@ -371,60 +373,53 @@ class TimetableGenerator:
         if self.enforce_ties:
             gene_idx = 0
             for map_item in self.gene_map:
-                lecture_choice = individual[gene_idx]
-                tutorial_choice = individual[gene_idx + 1]
+                lecture_choice, tutorial_choice = (
+                    individual[gene_idx],
+                    individual[gene_idx + 1],
+                )
                 chosen_pair = map_item["pairs"][lecture_choice]
-                lecture_section = chosen_pair[0]
-                sections_to_schedule.append(lecture_section)
+                sections_to_schedule.append(chosen_pair[0])
                 tied_tutorials = chosen_pair[1]
                 if tied_tutorials:
-                    safe_tutorial_choice = tutorial_choice % len(tied_tutorials)
-                    tutorial_section = tied_tutorials[safe_tutorial_choice]
-                    sections_to_schedule.append(tutorial_section)
+                    sections_to_schedule.append(
+                        tied_tutorials[tutorial_choice % len(tied_tutorials)]
+                    )
                 gene_idx += 2
         else:
             for i, map_item in enumerate(self.gene_map):
-                choice = individual[i]
-                sections_to_schedule.append(map_item["sections"][choice])
+                sections_to_schedule.append(map_item["sections"][individual[i]])
 
         # --- Check for clashes (HARD constraint) ---
         for section in sections_to_schedule:
             if not timetable.can_add_section(section):
-                return (0,)  # Invalid timetable
+                return (0,)
             timetable.add_section(section)
 
         # --- Score based on preferences (SOFT constraints) ---
         score = 10000.0
 
-        # ### NEW: Non-Linear Scoring for Days Used ###
-        # This is the most important change. The value of a day off is immense.
+        # --- Scoring constants (tunable knobs) ---
+        BONUS_PER_PREFERRED_LECTURER = (
+            200  # Significant bonus for getting a wanted lecturer
+        )
+        BONUS_FOR_TWO_CONSECUTIVE = 300
+        PENALTY_PER_EXTRA_CONSECUTIVE = 600
+        PENALTY_FOR_ISOLATED_CLASS = 100
+
+        # --- Non-Linear Scoring for Days Used ---
         days_used = timetable.get_utilized_days()
-        # A 3-day week is the baseline (0). Anything less is a huge bonus. Anything more is a penalty.
-        days_score_map = {
-            5: -1500,  # A 5-day week is highly undesirable
-            4: -750,  # A 4-day week is acceptable but not great
-            3: 0,  # A 3-day week is the standard goal
-            2: 2000,  # A 2-day week is amazing and gets a massive bonus
-            1: 3000,  # A 1-day week is the dream, gets an even bigger bonus
-        }
-        # Use .get() for safety, with a heavy penalty for unexpected values.
+        days_score_map = {5: -1500, 4: -750, 3: 0, 2: 2000, 1: 3000}
         score += days_score_map.get(days_used, -4000)
 
-        # --- Scoring for Streaks and Gaps (Within-Day Comfort) ---
-        # These values are now balanced against the powerful "days used" score.
-        BONUS_FOR_TWO_CONSECUTIVE = 300  # Good, but not as good as a day off
-        PENALTY_PER_EXTRA_CONSECUTIVE = 600  # Bad, but might be worth it for a day off
-        PENALTY_FOR_ISOLATED_CLASS = 100  # Annoying, but not a deal-breaker
-
-        # Score for gaps (rewards small, manageable breaks)
+        # --- Score for Gaps and Day/Time Preferences ---
+        preferred_lecturers = self.user_preferences.get("preferred_lecturers", [])
         total_gap_score = 0
         utilized_days = [day for day in DAYS if timetable.schedule[day]]
         if utilized_days:
             for day in utilized_days:
                 total_gap_score += timetable.get_day_gaps_score(day)
-            score += (total_gap_score / len(utilized_days)) * 500  # Reduced weight
+            score += (total_gap_score / len(utilized_days)) * 500
 
-        # Bonuses for preferred days/times (acts as a tie-breaker)
         for sc in timetable.scheduled_classes:
             if sc.day in self.user_preferences["preferred_days"]:
                 score += 50
@@ -434,8 +429,11 @@ class TimetableGenerator:
                 <= self.user_preferences["preferred_end"]
             ):
                 score += 25
+            # ### NEW: Apply bonus for preferred lecturers ###
+            if sc.class_obj.lecturer in preferred_lecturers:
+                score += BONUS_PER_PREFERRED_LECTURER
 
-        # Tiered scoring for class streaks
+        # --- Tiered scoring for class streaks ---
         for day in DAYS:
             day_classes = timetable.schedule[day]
             if not day_classes:
@@ -461,8 +459,9 @@ class TimetableGenerator:
                     elif consecutive_streak == 2:
                         score += BONUS_FOR_TWO_CONSECUTIVE
                     elif consecutive_streak > 2:
-                        over_limit = consecutive_streak - 2
-                        score -= over_limit * PENALTY_PER_EXTRA_CONSECUTIVE
+                        score -= (
+                            consecutive_streak - 2
+                        ) * PENALTY_PER_EXTRA_CONSECUTIVE
                     consecutive_streak = 1
 
             if consecutive_streak == 1:
@@ -470,12 +469,9 @@ class TimetableGenerator:
             elif consecutive_streak == 2:
                 score += BONUS_FOR_TWO_CONSECUTIVE
             elif consecutive_streak > 2:
-                over_limit = consecutive_streak - 2
-                score -= over_limit * PENALTY_PER_EXTRA_CONSECUTIVE
+                score -= (consecutive_streak - 2) * PENALTY_PER_EXTRA_CONSECUTIVE
 
-        return (
-            score,
-        )  # The run() method can stay the same as the previous version. It correctly
+        return (score,)
 
     # handles finding the best individual from the Hall of Fame and building
     # the final timetable. You will only need to adjust its decoding logic
@@ -548,12 +544,15 @@ class TimetableGenerator:
         return best_timetable
 
 
+# In tt.py, replace your existing get_user_preferences function with this one.
+
+
 def get_user_preferences(classes: List[Class]) -> dict:
-    """Get user preferences with validation"""
-    # Get unique courses
-    courses = sorted({cls.course for cls in classes})
+    """Get user preferences, including courses, days, times, ties, and lecturers."""
+    # --- Get Course Selection (Existing logic) ---
+    all_courses = sorted({cls.course for cls in classes})
     print("\nAvailable Courses:")
-    for i, course in enumerate(courses, 1):
+    for i, course in enumerate(all_courses, 1):
         print(f"{i}. {course}")
 
     while True:
@@ -564,28 +563,33 @@ def get_user_preferences(classes: List[Class]) -> dict:
                 .split(",")
             )
             selected_courses = [
-                courses[int(sel) - 1] for sel in selections if sel.strip()
+                all_courses[int(sel) - 1] for sel in selections if sel.strip()
             ]
             if not selected_courses:
-                print("Please select at least one course")
+                print("Please select at least one course.")
                 continue
             break
         except (ValueError, IndexError):
             print("Invalid selection. Please enter numbers from the list.")
 
+    # --- Get Day/Time Preferences (Existing logic) ---
     print("\nAvailable Days:", DAYS)
     while True:
-        preferred_days = (
-            input("Enter preferred days (comma separated): ").strip().split(",")
-        )
-        preferred_days = [day.strip().capitalize() for day in preferred_days]
-        # Validate days
-        invalid_days = [day for day in preferred_days if day not in DAYS]
-        if invalid_days:
-            print(f"Invalid days: {invalid_days}. Please choose from {DAYS}")
+        preferred_days_str = input(
+            f"Enter preferred days (e.g., Monday,Tuesday) or press Enter for any: "
+        ).strip()
+        if not preferred_days_str:
+            preferred_days = DAYS  # Default to all days
+            break
+        preferred_days = [
+            day.strip().capitalize() for day in preferred_days_str.split(",")
+        ]
+        if any(day not in DAYS for day in preferred_days):
+            print(f"Invalid day found. Please choose from {DAYS}")
         else:
             break
 
+    # ... (Keep your existing time preference logic)
     print("\nPreferred time range (24-hour format)")
     while True:
         try:
@@ -600,12 +604,14 @@ def get_user_preferences(classes: List[Class]) -> dict:
         except ValueError:
             print("Invalid time format. Please use HH:MM (24-hour format)")
 
-    # ### NEW ###: Ask whether to enforce the ties
+    # --- Get Tie Enforcement (Existing logic) ---
     while True:
         enforce_str = (
-            input("\nEnforce lecture/tutorial ties? (yes/no): ").strip().lower()
+            input("\nEnforce lecture/tutorial ties? (Highly recommended) (yes/no): ")
+            .strip()
+            .lower()
         )
-        if enforce_str in ["yes", "y"]:
+        if enforce_str in ["yes", "y", ""]:  # Default to yes
             enforce_ties = True
             break
         elif enforce_str in ["no", "n"]:
@@ -614,14 +620,50 @@ def get_user_preferences(classes: List[Class]) -> dict:
         else:
             print("Invalid input. Please enter 'yes' or 'no'.")
 
-    existing_prefs = {
-        "courses": selected_courses,  # This is from your existing code
-        "preferred_days": preferred_days,  # This is from your existing code
-        "preferred_start": preferred_start,  # This is from your existing code
-        "preferred_end": preferred_end,  # This is from your existing code
+    # ### NEW: Get Lecturer Preferences ###
+    # First, find all lecturers available for the selected courses.
+    available_lecturers = sorted(
+        list(
+            set(
+                cls.lecturer
+                for cls in classes
+                if cls.course in selected_courses and cls.lecturer != "Not Assigned"
+            )
+        )
+    )
+
+    selected_lecturers = []
+    if available_lecturers:
+        print("\n--- Optional: Select Preferred Lecturers ---")
+        print("Schedules with these lecturers will be prioritized.")
+        for i, lec in enumerate(available_lecturers, 1):
+            print(f"{i}. {lec}")
+
+        while True:
+            try:
+                lec_selections_str = input(
+                    "\nEnter numbers of preferred lecturers (comma separated), or press Enter to skip: "
+                ).strip()
+                if not lec_selections_str:
+                    break  # User skipped
+                lec_selections = lec_selections_str.split(",")
+                selected_lecturers = [
+                    available_lecturers[int(sel) - 1]
+                    for sel in lec_selections
+                    if sel.strip()
+                ]
+                break
+            except (ValueError, IndexError):
+                print("Invalid selection. Please enter numbers from the list.")
+
+    return {
+        "courses": selected_courses,
+        "preferred_days": preferred_days,
+        "preferred_start": preferred_start,
+        "preferred_end": preferred_end,
+        "enforce_ties": enforce_ties,
+        "preferred_lecturers": selected_lecturers,  # ### NEW ###
     }
-    existing_prefs["enforce_ties"] = enforce_ties
-    return existing_prefs
 
 
 def print_timetable(timetable: Timetable):
@@ -682,6 +724,31 @@ def print_missing_courses(
                     print(f"    - {section_key}")
 
 
+# In tt.py, add this new function somewhere before your main() function.
+
+
+def print_lecturer_summary(timetable: Timetable, user_prefs: dict):
+    """Shows which of the user's preferred lecturers were scheduled."""
+    preferred_lecturers = user_prefs.get("preferred_lecturers", [])
+    if not preferred_lecturers:
+        return  # Don't print anything if the user didn't select any
+
+    print("\n=== Lecturer Preference Summary ===")
+
+    scheduled_lecturers = {sc.class_obj.lecturer for sc in timetable.scheduled_classes}
+
+    honored_prefs = set(preferred_lecturers) & scheduled_lecturers
+
+    if honored_prefs:
+        print(
+            f"Successfully scheduled classes with: {', '.join(sorted(list(honored_prefs)))}"
+        )
+    else:
+        print(
+            "Unfortunately, none of your preferred lecturers could be included in a clash-free schedule."
+        )
+
+
 def main():
     print("=== University Timetable Generator ===")
     classes = load_classes_from_csv("classes.csv")
@@ -702,6 +769,7 @@ def main():
         if best_timetable:
             print_timetable(best_timetable)
             print_section_summary(best_timetable)
+            print_lecturer_summary(best_timetable, user_prefs)  # ### ADD THIS LINE ###
 
             print("\n=== Schedule Statistics ===")
             days_used = best_timetable.get_utilized_days()
